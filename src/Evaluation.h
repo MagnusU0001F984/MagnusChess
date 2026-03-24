@@ -25,10 +25,10 @@ SOFTWARE.
 #pragma once
 
 #include "Position.h"
+#include "Types.h"
 
 namespace valerain::eval {
 
-void init() noexcept;
-int hce(const Position& pos) noexcept;
+Score evaluate(const Position& pos) noexcept;
 
 } // namespace valerain::eval

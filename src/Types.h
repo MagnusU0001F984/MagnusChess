@@ -41,6 +41,7 @@ using Bitboard = u64;
 using Key      = u64;
 using Move     = u16;
 using Square   = int;
+using Score = int;
 
 constexpr int SQ_NB    = 64;
 constexpr int FILE_NB  = 8;
