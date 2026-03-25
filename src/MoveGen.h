@@ -90,7 +90,6 @@ struct ScoredMoveList {
 };
 
 struct GenInfo {
-    // Precomputed side-to-move context shared by the different generators.
     Color us = WHITE;
     Color them = BLACK;
 
@@ -98,13 +97,13 @@ struct GenInfo {
     Square ep_sq = NO_SQ;
 
     Bitboard occupied = 0ULL;
+    Bitboard empty = 0ULL;
     Bitboard us_occ = 0ULL;
     Bitboard them_occ = 0ULL;
-    Bitboard empty = 0ULL;
 
     Bitboard checkers = 0ULL;
-    Bitboard pinned = 0ULL;
     Bitboard pinners = 0ULL;
+    Bitboard pinned = 0ULL;
     Bitboard danger = 0ULL;
 
     Bitboard capture_mask = 0ULL;
@@ -251,8 +250,21 @@ bool pseudo_legal(
 ) noexcept;
 
 bool legal(
+    Position& pos,
+    const memory::Memory& mem,
+    Move m
+) noexcept;
+
+bool legal(
     const Position& pos,
     const memory::Memory& mem,
+    Move m
+) noexcept;
+
+bool legal_fast(
+    Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
     Move m
 ) noexcept;
 
@@ -290,6 +302,26 @@ Move* generate_evasions(
 ) noexcept;
 
 Move* generate_pseudo_legal(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move* out
+) noexcept;
+
+Move* generate_pseudo_legal(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move* out
+) noexcept;
+
+Move* generate_pseudo_captures(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move* out
+) noexcept;
+
+Move* generate_pseudo_captures(
     const Position& pos,
     const memory::Memory& mem,
     Move* out

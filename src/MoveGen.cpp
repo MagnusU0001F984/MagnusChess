@@ -30,7 +30,7 @@ SOFTWARE.
 
 /*
 This file builds legal move lists from bitboards plus precomputed attack tables.
-It first derives side-to-move context (checkers, pins, danger squares, masks),
+It first derives side-to-move context (checkers, pins, masks),
 then uses specialized generators for evasions, non-evasions, and the final
 legality filter.
 */
@@ -63,14 +63,12 @@ inline Bitboard ortho_sliders_bb(const Position& pos, Color c) noexcept {
     return pieces_bb(pos, c, ROOK) | pieces_bb(pos, c, QUEEN);
 }
 
-inline AttackBitboard attacks_by_color_on_occ(
+inline Bitboard attacks_by_color_on_occ(
     const Position& pos,
     const memory::Memory& mem,
     Color by,
     Bitboard occupied
 ) noexcept {
-    // Aggregate every attack for one side on a supplied occupancy map. This is
-    // used for danger maps, legality checks, and king-move filtering.
     Bitboard attacks = 0ULL;
 
     Bitboard pawns   = pieces_bb(pos, by, PAWN);
@@ -85,31 +83,26 @@ inline AttackBitboard attacks_by_color_on_occ(
         pawns &= pawns - 1;
         attacks |= pawn_attacks(mem, by, sq);
     }
-
     while (knights) {
         const Square sq = lsb_sq(knights);
         knights &= knights - 1;
         attacks |= knight_attacks(mem, sq);
     }
-
     while (bishops) {
         const Square sq = lsb_sq(bishops);
         bishops &= bishops - 1;
         attacks |= bishop_attacks(mem, sq, occupied);
     }
-
     while (rooks) {
         const Square sq = lsb_sq(rooks);
         rooks &= rooks - 1;
         attacks |= rook_attacks(mem, sq, occupied);
     }
-
     while (queens) {
         const Square sq = lsb_sq(queens);
         queens &= queens - 1;
         attacks |= queen_attacks(mem, sq, occupied);
     }
-
     while (kings) {
         const Square sq = lsb_sq(kings);
         kings &= kings - 1;
@@ -395,7 +388,6 @@ inline Move* generate_king_non_evasions(
 ) noexcept {
     const Square from = info.king_sq;
     Bitboard mask = king_attacks(mem, from);
-
     mask &= ~info.us_occ;
     mask &= ~info.danger;
 
@@ -864,7 +856,7 @@ inline Move* generate_castling_non_evasions(
             piece_on(pos, 4) == W_KING &&
             piece_on(pos, 7) == W_ROOK &&
             !(info.occupied & (bb_of(5) | bb_of(6))) &&
-            !(info.danger   & (bb_of(5) | bb_of(6)))) {
+            !(info.danger & (bb_of(5) | bb_of(6)))) {
             *out++ = make_move(4, 6, MOVE_OO);
         }
 
@@ -873,7 +865,7 @@ inline Move* generate_castling_non_evasions(
             piece_on(pos, 4) == W_KING &&
             piece_on(pos, 0) == W_ROOK &&
             !(info.occupied & (bb_of(1) | bb_of(2) | bb_of(3))) &&
-            !(info.danger   & (bb_of(2) | bb_of(3)))) {
+            !(info.danger & (bb_of(2) | bb_of(3)))) {
             *out++ = make_move(4, 2, MOVE_OOO);
         }
     } else {
@@ -882,7 +874,7 @@ inline Move* generate_castling_non_evasions(
             piece_on(pos, 60) == B_KING &&
             piece_on(pos, 63) == B_ROOK &&
             !(info.occupied & (bb_of(61) | bb_of(62))) &&
-            !(info.danger   & (bb_of(61) | bb_of(62)))) {
+            !(info.danger & (bb_of(61) | bb_of(62)))) {
             *out++ = make_move(60, 62, MOVE_OO);
         }
 
@@ -891,7 +883,7 @@ inline Move* generate_castling_non_evasions(
             piece_on(pos, 60) == B_KING &&
             piece_on(pos, 56) == B_ROOK &&
             !(info.occupied & (bb_of(57) | bb_of(58) | bb_of(59))) &&
-            !(info.danger   & (bb_of(58) | bb_of(59)))) {
+            !(info.danger & (bb_of(58) | bb_of(59)))) {
             *out++ = make_move(60, 58, MOVE_OOO);
         }
     }
@@ -944,7 +936,7 @@ inline bool legal_slow(
     return legal;
 }
 
-inline bool legal_fast(
+inline bool legal_fast_impl(
     Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
@@ -1103,7 +1095,6 @@ void init_gen_info(
     const Position& pos,
     const memory::Memory& mem
 ) noexcept {
-    // Precompute the common masks once so each generation mode can reuse them.
     info.us   = static_cast<Color>(pos.side_to_move);
     info.them = opposite(info.us);
 
@@ -1111,13 +1102,13 @@ void init_gen_info(
     info.ep_sq   = pos.ep_sq;
 
     info.occupied = pos.occupied;
+    info.empty    = ~info.occupied;
     info.us_occ   = pos.color_bb[info.us];
     info.them_occ = pos.color_bb[info.them];
-    info.empty    = ~info.occupied;
 
     info.checkers = checkers_bb(pos, mem, info.us);
     compute_pinners_and_pinned(pos, mem, info.us, info.pinners, info.pinned);
-    info.danger   = danger_bb(pos, mem, info.them);
+    info.danger = danger_bb(pos, mem, info.them);
 
     info.in_check     = info.checkers != 0;
     info.double_check = more_than_one(info.checkers);
@@ -1164,12 +1155,29 @@ bool pseudo_legal(
 }
 
 bool legal(
+    Position& pos,
+    const memory::Memory& mem,
+    Move m
+) noexcept {
+    return legal_slow(pos, mem, m);
+}
+
+bool legal(
     const Position& pos,
     const memory::Memory& mem,
     Move m
 ) noexcept {
     Position work = pos;
-    return legal_slow(work, mem, m);
+    return legal(work, mem, m);
+}
+
+bool legal_fast(
+    Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move m
+) noexcept {
+    return legal_fast_impl(pos, mem, info, m);
 }
 
 Move* generate_captures(
@@ -1190,7 +1198,7 @@ Move* generate_captures(
     for (Move* it = pseudo; it != mid; ++it) {
         if (!move_is_capture(*it))
             continue;
-        if (legal_fast(pos, mem, info, *it))
+        if (legal_fast_impl(pos, mem, info, *it))
             *out++ = *it;
     }
 
@@ -1221,7 +1229,7 @@ Move* generate_quiets(
     for (Move* it = pseudo; it != mid; ++it) {
         if (move_is_capture(*it))
             continue;
-        if (legal_fast(work, mem, info, *it))
+        if (legal_fast_impl(work, mem, info, *it))
             *out++ = *it;
     }
 
@@ -1259,11 +1267,41 @@ Move* generate_evasions(
 Move* generate_pseudo_legal(
     const Position& pos,
     const memory::Memory& mem,
+    const GenInfo& info,
+    Move* out
+) noexcept {
+    return generate_pseudo_legal_with_info(pos, mem, info, out);
+}
+
+Move* generate_pseudo_legal(
+    const Position& pos,
+    const memory::Memory& mem,
     Move* out
 ) noexcept {
     GenInfo info{};
     init_gen_info(info, pos, mem);
     return generate_pseudo_legal_with_info(pos, mem, info, out);
+}
+
+Move* generate_pseudo_captures(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move* out
+) noexcept {
+    return info.in_check
+        ? generate_evasions_with_info(pos, mem, info, out)
+        : generate_capture_non_evasions_with_info(pos, mem, info, out);
+}
+
+Move* generate_pseudo_captures(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move* out
+) noexcept {
+    GenInfo info{};
+    init_gen_info(info, pos, mem);
+    return generate_pseudo_captures(pos, mem, info, out);
 }
 
 Move* generate_legal(
@@ -1279,7 +1317,7 @@ Move* generate_legal(
     Move pseudo[MAX_MOVES];
     Move* mid = generate_pseudo_legal_with_info(pos, mem, info, pseudo);
     for (Move* it = pseudo; it != mid; ++it) {
-        if (legal_fast(pos, mem, info, *it))
+        if (legal_fast_impl(pos, mem, info, *it))
             *out++ = *it;
     }
 

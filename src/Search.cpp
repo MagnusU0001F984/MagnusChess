@@ -54,6 +54,7 @@ constexpr int FUTILITY_MARGIN[3] = { 0, 120, 240 };
 constexpr int REVERSE_FUTILITY_MARGIN[4] = { 0, 90, 180, 300 };
 constexpr int RAZOR_MARGIN[3] = { 0, 280, 420 };
 constexpr int ASPIRATION_DELTA = 24;
+constexpr int REPETITION_AVOID_SCORE = -16;
 
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
@@ -75,6 +76,7 @@ struct Searcher {
     i32 history[COLOR_NB][PIECE_TYPE_NB][SQ_NB]{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
+    Key rep_keys[MAX_PLY + 1]{};
     clock::time_point start_time{};
     bool stopped = false;
     bool hard_stop = false;
@@ -213,6 +215,29 @@ struct Searcher {
         if (use_nnue())
             return nnue::to_cp(nnue::eval(pos), pos);
         return eval::evaluate(pos);
+    }
+
+    [[nodiscard]] bool is_threefold_repetition(
+        const Position& pos,
+        int ply
+    ) const noexcept {
+        int matches = 0;
+        const int back = std::min(ply, pos.halfmove_clock);
+        const int min_ply = ply - back;
+
+        for (int p = ply - 2; p >= min_ply; p -= 2) {
+            if (rep_keys[p] != pos.key)
+                continue;
+            if (++matches >= 2)
+                return true;
+        }
+
+        return false;
+    }
+
+    [[nodiscard]] inline int repetition_score(const Position& pos) const noexcept {
+        const int static_eval = evaluate_position(pos);
+        return static_eval > 0 ? REPETITION_AVOID_SCORE : 0;
     }
 
     [[nodiscard]] bool has_non_pawn_material(
@@ -430,6 +455,7 @@ struct Searcher {
         // Quiescence search extends only tactical continuations (or all legal
         // evasions when in check) so the engine does not stand pat in unstable positions.
         pv_length[ply] = 0;
+        rep_keys[ply] = pos.key;
         ++nodes;
         poll_limits();
         if (stopped)
@@ -440,6 +466,8 @@ struct Searcher {
 
         if (pos.halfmove_clock >= 100)
             return 0;
+        if (is_threefold_repetition(pos, ply))
+            return repetition_score(pos);
 
         alpha = std::max(alpha, -VALUE_MATE + ply);
         beta = std::min(beta, VALUE_MATE - ply - 1);
@@ -470,10 +498,10 @@ struct Searcher {
         }
 
         MoveList list{};
-        if (checked)
-            generate_legal(pos, mem, list);
-        else
-            generate_captures(pos, mem, list);
+        GenInfo info{};
+        init_gen_info(info, pos, mem);
+        Move* qend = generate_pseudo_captures(pos, mem, info, list.moves);
+        list.size = static_cast<int>(qend - list.moves);
 
         if (list.size == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : alpha;
@@ -485,8 +513,13 @@ struct Searcher {
         score_moves(pos, list, scored, tt_move, ply);
 
         Move best_move = 0;
+        int legal_count = 0;
         for (int i = 0; i < scored.size; ++i) {
             const Move move = pick_next(scored, i);
+            if (!legal_fast(pos, mem, info, move))
+                continue;
+
+            ++legal_count;
 
             if (!checked && !move_is_promotion(move)) {
                 // Delta pruning skips captures that cannot reasonably raise alpha.
@@ -510,6 +543,12 @@ struct Searcher {
             }
         }
 
+        if (legal_count == 0) {
+            const int score = checked ? (-VALUE_MATE + ply) : alpha;
+            save_tt(pos, 0, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            return score;
+        }
+
         save_tt(pos, 0, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
@@ -527,6 +566,7 @@ struct Searcher {
         // - later moves get a null window first
         // - promising moves are re-searched on a wider window
         pv_length[ply] = 0;
+        rep_keys[ply] = pos.key;
 
         if (stopped)
             return alpha;
@@ -536,10 +576,20 @@ struct Searcher {
 
         if (pos.halfmove_clock >= 100)
             return 0;
+        if (is_threefold_repetition(pos, ply))
+            return repetition_score(pos);
 
         alpha = std::max(alpha, -VALUE_MATE + ply);
         beta = std::min(beta, VALUE_MATE - ply - 1);
         if (alpha >= beta)
+            return alpha;
+
+        if (depth <= 0)
+            return qsearch(pos, alpha, beta, ply);
+
+        ++nodes;
+        poll_limits();
+        if (stopped)
             return alpha;
 
         const int alpha0 = alpha;
@@ -549,9 +599,6 @@ struct Searcher {
         int tt_score = 0;
         if (tt_cutoff(probe, depth, alpha, beta, ply, tt_score))
             return tt_score;
-
-        if (depth <= 0)
-            return qsearch(pos, alpha, beta, ply);
 
         const Move tt_move = tt_move_from_probe(probe);
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(pos);
@@ -606,25 +653,18 @@ struct Searcher {
             }
         }
 
-        ++nodes;
-        poll_limits();
-        if (stopped)
-            return alpha;
-
         MoveList list{};
-        generate_legal(pos, mem, list);
-
-        if (list.size == 0) {
-            const int score = checked ? (-VALUE_MATE + ply) : 0;
-            save_tt(pos, depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
-            return score;
-        }
+        GenInfo info{};
+        init_gen_info(info, pos, mem);
+        Move* pend = generate_pseudo_legal(pos, mem, info, list.moves);
+        list.size = static_cast<int>(pend - list.moves);
 
         ScoredMoveList scored{};
         score_moves(pos, list, scored, tt_move, ply);
 
         bool searched_first = false;
         Move best_move = 0;
+        int legal_count = 0;
         int quiet_count = 0;
         Move searched_quiets[MAX_MOVES];
         int searched_quiet_count = 0;
@@ -635,6 +675,10 @@ struct Searcher {
                 break;
 
             const Move move = pick_next(scored, i);
+            if (!legal_fast(pos, mem, info, move))
+                continue;
+
+            ++legal_count;
             const bool quiet_move =
                 !move_is_capture(move) &&
                 !move_is_promotion(move) &&
@@ -733,6 +777,12 @@ struct Searcher {
             }
         }
 
+        if (legal_count == 0) {
+            const int score = checked ? (-VALUE_MATE + ply) : 0;
+            save_tt(pos, depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            return score;
+        }
+
         if (!cutoff &&
             alpha > alpha0 &&
             best_move != 0 &&
@@ -755,30 +805,36 @@ struct Searcher {
         // Root search mirrors PVS, but it also keeps the best move/result for UCI output.
         SearchResult result{};
         result.depth = depth;
+        rep_keys[0] = root.key;
 
         MoveList list{};
-        generate_legal(root, mem, list);
-        if (list.size == 0) {
-            result.score = in_check(root) ? -VALUE_MATE : 0;
-            return result;
-        }
+        GenInfo info{};
+        init_gen_info(info, root, mem);
+        Move* rend = generate_pseudo_legal(root, mem, info, list.moves);
+        list.size = static_cast<int>(rend - list.moves);
 
         const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
         const Move tt_move = tt_move_from_probe(probe);
         const Move root_hint = move_is_none(tt_move) ? hint_move : tt_move;
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(root);
         const int alpha0 = alpha;
+        const bool checked = in_check(root);
 
         ScoredMoveList scored{};
         score_moves(root, list, scored, root_hint, 0);
         int best_score = -VALUE_INF;
-        result.best_move = scored.size > 0 ? scored.moves[0].move : 0;
+        int legal_count = 0;
+        result.best_move = 0;
 
         for (int i = 0; i < scored.size; ++i) {
             if (hit_hard_limit())
                 break;
 
             const Move move = pick_next(scored, i);
+            if (!legal_fast(root, mem, info, move))
+                continue;
+
+            ++legal_count;
             StateInfo st{};
             make_move(root, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, root.key);
@@ -805,6 +861,12 @@ struct Searcher {
                 if (alpha >= beta)
                     break;
             }
+        }
+
+        if (legal_count == 0) {
+            result.score = checked ? -VALUE_MATE : 0;
+            result.best_move = 0;
+            return result;
         }
 
         if (best_score == -VALUE_INF)
