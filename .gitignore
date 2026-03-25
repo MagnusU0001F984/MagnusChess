@@ -1,0 +1,17 @@
+*.exe
+*.o
+*.obj
+*.dll
+*.so
+
+*.nnue
+
+.vscode/
+.idea/
+
+.DS_Store
+Thumbs.db
+
+*.tmp
+*.log
+*.swp
