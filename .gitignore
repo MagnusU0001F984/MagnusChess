@@ -3,11 +3,13 @@
 *.obj
 *.dll
 *.so
+*.d
 
 *.nnue
 
 .vscode/
 .idea/
+.build/
 
 .DS_Store
 Thumbs.db
