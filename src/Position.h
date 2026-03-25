@@ -28,6 +28,13 @@ SOFTWARE.
 
 namespace valerain {
 
+struct Tables;
+
+/*
+Position is the engine's canonical board state. It keeps mailbox access for
+simple piece lookup, bitboards for fast move generation, incremental eval
+totals, and an incremental Zobrist key for search and TT use.
+*/
 struct Position {
     int side_to_move = WHITE;
     Square ep_sq = NO_SQ;
@@ -44,10 +51,12 @@ struct Position {
     int eval_mg[COLOR_NB]{};
     int eval_eg[COLOR_NB]{};
     int eval_phase = 0;
+    Key key = 0;
 
     int board[SQ_NB];
 };
 
+// Convenience accessors used throughout the engine.
 inline int us(const Position& pos) noexcept {
     return pos.side_to_move;
 }
@@ -105,6 +114,8 @@ inline bool occupied_on(const Position& pos, Square sq) noexcept {
 void position_clear(Position& pos) noexcept;
 void position_recompute_occupied(Position& pos) noexcept;
 void position_refresh_king_squares(Position& pos) noexcept;
+[[nodiscard]] Key position_compute_key(const Position& pos, const Tables& tables) noexcept;
+void position_refresh_key(Position& pos, const Tables& tables) noexcept;
 
 void position_put_piece(
     Position& pos,
@@ -130,6 +141,10 @@ void position_move_piece(
 
 bool position_has_valid_kings(const Position& pos) noexcept;
 bool position_board_matches_bitboards(const Position& pos) noexcept;
+
+// Copy-make helpers used by perft and search. The overload with Tables keeps
+// the incremental Zobrist key up to date as well.
 void do_move_copy(Position& pos, Move m) noexcept;
+void do_move_copy(Position& pos, Move m, const Tables& tables) noexcept;
 
 } // namespace valerain

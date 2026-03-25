@@ -22,10 +22,21 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Main.cpp
-
 #include "Bench.h"
+#include "Uci.h"
 
+#include <string_view>
+
+/*
+Command-line entry point. No arguments starts the engine in UCI mode, while
+explicit subcommands keep the lightweight bench/perft tooling available.
+*/
 int main(int argc, char** argv) {
+    if (argc <= 1)
+        return valerain::run_uci();
+
+    if (std::string_view(argv[1]) == "uci")
+        return valerain::run_uci();
+
     return valerain::run_bench(argc, argv);
 }

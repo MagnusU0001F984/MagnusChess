@@ -22,9 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// This is Attack.h
-// Stage 3: backend-ready slider table scaffolding + BMI2/PEXT backend.
-
 #pragma once
 
 #include <cstddef>
@@ -33,6 +30,12 @@ SOFTWARE.
 #include "Memory.h"
 
 namespace valerain {
+
+/*
+Attack generation is split into leaper lookups and slider backends. The public
+API hides whether bishops and rooks are served by classical scans, dense tables,
+or BMI2/PEXT indexing.
+*/
 
 using AttackBitboard = memory::Bitboard;
 using AttackColor    = memory::Color;
@@ -44,6 +47,7 @@ constexpr int ATTACK_RANK_NB  = memory::RANK_NB;
 constexpr int ATTACK_COLOR_NB = memory::COLOR_NB;
 constexpr int ATTACK_PIECE_NB = memory::PIECE_NB;
 
+// Small wrappers keep the attack layer independent from the main Types names.
 constexpr AttackBitboard attack_bb_of(int sq) noexcept {
     return 1ULL << sq;
 }
@@ -122,6 +126,7 @@ enum class AttackBackendKind : int {
 };
 
 struct SliderAttackEntry {
+    // Dense-table metadata for one bishop or rook source square.
     AttackBitboard mask = 0ULL;
     std::uint32_t offset = 0;
     std::uint8_t relevant_bits = 0;

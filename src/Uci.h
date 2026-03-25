@@ -24,39 +24,12 @@ SOFTWARE.
 
 #pragma once
 
-#include "Position.h"
-#include "Types.h"
-
-namespace valerain::eval {
+namespace valerain {
 
 /*
-The evaluation interface is intentionally small. Position owns the incremental
-middlegame/endgame accumulators, and these hooks keep that cached state in sync
-whenever pieces are added, removed, or moved.
+Minimal UCI front-end for the engine. It owns command parsing, option handling,
+position setup, and dispatch into the synchronous search loop.
 */
+int run_uci();
 
-void on_piece_added(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept;
-
-void on_piece_removed(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept;
-
-void on_piece_moved(
-    Position& pos,
-    Color color,
-    PieceType piece_type,
-    Square from,
-    Square to
-) noexcept;
-
-Score evaluate(const Position& pos) noexcept;
-
-} // namespace valerain::eval
+} // namespace valerain

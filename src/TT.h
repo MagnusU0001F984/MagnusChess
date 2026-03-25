@@ -35,6 +35,12 @@ SOFTWARE.
 
 namespace valerain::memory {
 
+/*
+The transposition table is organized as fixed-size 64-byte clusters with four
+lanes each. That layout keeps probe/store traffic cache friendly while still
+allowing a simple depth-and-age replacement policy.
+*/
+
 using ::valerain::u8;
 using ::valerain::u16;
 using ::valerain::u32;
@@ -52,6 +58,7 @@ enum Bound : u8 {
 };
 
 struct TTData {
+    // Compact logical view of one TT entry.
     u32 tag32 = 0;
     u16 move  = 0;
     i16 score = 0;
@@ -63,6 +70,7 @@ struct TTData {
 };
 
 struct alignas(64) TTCluster {
+    // Physical storage for four packed TT entries inside one cache line.
     u32 tag32[4]{};
     u16 move[4]{};
     i16 score[4]{};
@@ -76,6 +84,7 @@ struct alignas(64) TTCluster {
 static_assert(sizeof(TTCluster) == 64, "TTCluster must be 64 bytes.");
 
 struct TT {
+    // Global TT allocation plus search-generation bookkeeping.
     TTCluster* clusters = nullptr;
     std::size_t cluster_count = 0;
     std::size_t cluster_mask = 0;
@@ -98,6 +107,7 @@ struct TTProbe {
     TTData data{};
 };
 
+// Low-level cluster helpers and public probe/save API.
 [[nodiscard]] TTData tt_cluster_load(const TTCluster& c, int lane) noexcept;
 void tt_cluster_store(TTCluster& c, int lane, const TTData& d) noexcept;
 void tt_cluster_clear(TTCluster& c) noexcept;

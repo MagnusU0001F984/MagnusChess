@@ -27,6 +27,7 @@ SOFTWARE.
 #include "Memory.h"
 #include "Perft.h"
 #include "Position.h"
+#include "Search.h"
 
 #include <chrono>
 #include <cstdlib>
@@ -36,7 +37,14 @@ SOFTWARE.
 
 namespace valerain {
 
+/*
+Bench mode is deliberately tiny: create a start position, initialize shared
+tables, then route either to perft/divide or to the fixed-depth search smoke test.
+*/
+
 void set_start_position(Position& pos) noexcept {
+    // Rebuild the standard initial chess position through the public mutators so
+    // all caches and bitboards are initialized exactly as search expects.
     position_clear(pos);
 
     pos.side_to_move = WHITE;
@@ -102,12 +110,21 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         cfg.divide = true;
         argi = 2;
     }
+    else if (argc > 1 && std::string_view(argv[1]) == "search") {
+        cfg.search = true;
+        argi = 2;
+    }
 
-    if (argc > argi) cfg.perft_depth = std::max(0, std::atoi(argv[argi]));
-    if (argc > argi + 1) cfg.hash_mb = static_cast<std::size_t>(std::strtoull(argv[argi + 1], nullptr, 10));
-    if (argc > argi + 2) cfg.threads = static_cast<std::size_t>(std::strtoull(argv[argi + 2], nullptr, 10));
-    if (argc > argi + 3 && std::string_view(argv[argi + 3]) == "live")
-        cfg.live_divide = true;
+    if (cfg.search) {
+        if (argc > argi) cfg.search_depth = std::max(1, std::atoi(argv[argi]));
+        if (argc > argi + 1) cfg.hash_mb = static_cast<std::size_t>(std::strtoull(argv[argi + 1], nullptr, 10));
+    } else {
+        if (argc > argi) cfg.perft_depth = std::max(0, std::atoi(argv[argi]));
+        if (argc > argi + 1) cfg.hash_mb = static_cast<std::size_t>(std::strtoull(argv[argi + 1], nullptr, 10));
+        if (argc > argi + 2) cfg.threads = static_cast<std::size_t>(std::strtoull(argv[argi + 2], nullptr, 10));
+        if (argc > argi + 3 && std::string_view(argv[argi + 3]) == "live")
+            cfg.live_divide = true;
+    }
     if (cfg.hash_mb == 0) cfg.hash_mb = 1;
     if (cfg.threads == 0) cfg.threads = 1;
 
@@ -128,6 +145,16 @@ int run_bench(int argc, char** argv) {
         std::cerr << "position bootstrap failed\n";
         memory_free(mem);
         return 1;
+    }
+
+    if (cfg.search) {
+        const search::SearchLimits limits{cfg.search_depth};
+        const search::SearchResult res =
+            search::iterative_deepening(pos, mem, limits, &std::cout);
+
+        std::cout << "bestmove " << search::move_to_uci(res.best_move) << "\n";
+        memory_free(mem);
+        return 0;
     }
 
     if (cfg.divide) {

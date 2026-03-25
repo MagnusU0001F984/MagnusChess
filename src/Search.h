@@ -25,58 +25,49 @@ SOFTWARE.
 #pragma once
 
 #include <cstddef>
-#include <cstdint>
-#include <ostream>
+#include <iosfwd>
 #include <string>
 
 #include "Memory.h"
 #include "Position.h"
+#include "Types.h"
 
-namespace valerain {
+namespace valerain::search {
 
 /*
-Perft is used to validate move generation by counting legal move trees exactly.
-This file also exposes a small benchmarking surface for move-generator speed.
+This header exposes the search entry points used by both the bench command and
+the UCI loop. The implementation is a classical iterative-deepening PVS search
+with a small set of pragmatic pruning heuristics.
 */
 
-using NodeCount = std::uint64_t;
+constexpr int MAX_PLY = 128;
 
-struct PerftDivideRow {
-    int index = 0;
-    std::string move;
-    NodeCount nodes = 0;
-    double seconds = 0.0;
-    double knps = 0.0;
+struct SearchLimits {
+    // Depth, node, and time limits supplied by bench mode or UCI.
+    int depth = MAX_PLY;
+    u64 node_limit = 0;
+    int soft_time_ms = 0;
+    int hard_time_ms = 0;
+    bool infinite = false;
+    bool use_nnue = false;
 };
 
-NodeCount perft(const Position& pos, const memory::Memory& mem, int depth);
-NodeCount perft_mt(
-    const Position& pos,
-    const memory::Memory& mem,
-    int depth,
-    std::size_t threads
-);
-
-void divide(const Position& pos,
-            const memory::Memory& mem,
-            int depth,
-            std::ostream& os,
-            std::size_t threads = 1,
-            bool live = false);
-
-struct GenSpeedResult {
-    std::uint64_t iterations = 0;
-    std::uint64_t total_moves = 0;
-    double seconds = 0.0;
-    double generations_per_second = 0.0;
-    double moves_per_second = 0.0;
+struct SearchResult {
+    // Final root move plus the score and aggregate search statistics.
+    Move best_move = 0;
+    Score score = 0;
+    u64 nodes = 0;
+    int depth = 0;
 };
 
-// Repeatedly times legal move generation on a fixed position.
-GenSpeedResult benchmark_generation(
-    const Position& pos,
-    const memory::Memory& mem,
-    std::uint64_t iterations
+// Converts the internal 16-bit move format into UCI coordinate notation.
+[[nodiscard]] std::string move_to_uci(Move m);
+
+[[nodiscard]] SearchResult iterative_deepening(
+    const Position& root,
+    memory::Memory& mem,
+    const SearchLimits& limits,
+    std::ostream* out = nullptr
 );
 
-} // namespace valerain
+} // namespace valerain::search

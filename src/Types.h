@@ -28,6 +28,12 @@ SOFTWARE.
 
 namespace valerain {
 
+/*
+Core scalar aliases and chess-wide enum definitions live here. Every other
+module shares these types so that move generation, search, evaluation, and
+hashing all agree on the same compact representation.
+*/
+
 using u8  = std::uint8_t;
 using u16 = std::uint16_t;
 using u32 = std::uint32_t;
@@ -43,6 +49,7 @@ using Move     = u16;
 using Square   = int;
 using Score = int;
 
+// Fixed board dimensions used across the entire engine.
 constexpr int SQ_NB    = 64;
 constexpr int FILE_NB  = 8;
 constexpr int RANK_NB  = 8;

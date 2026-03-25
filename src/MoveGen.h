@@ -22,11 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-//This is MoveGen.h
-//Just
-//bitboards、between/line/pinned 、magic bitboards、pseudo-legal + special-case legal filter
-//Will to join many trick.
-
 #pragma once
 
 #include "Types.h"
@@ -34,6 +29,12 @@ SOFTWARE.
 #include "Position.h"
 
 namespace valerain {
+
+/*
+Move generation combines bitboards, attack tables, pin masks, and a final
+legality filter. The code keeps a simple external API while reusing the same
+helpers for captures, evasions, and full legal move lists.
+*/
 
 constexpr int MAX_MOVES = 256;
 
@@ -73,6 +74,7 @@ enum MoveFlag : u16 {
 };
 
 struct MoveList {
+    // Plain move container used by perft and search.
     Move moves[MAX_MOVES];
     int size = 0;
 };
@@ -88,6 +90,7 @@ struct ScoredMoveList {
 };
 
 struct GenInfo {
+    // Precomputed side-to-move context shared by the different generators.
     Color us = WHITE;
     Color them = BLACK;
 
@@ -111,6 +114,7 @@ struct GenInfo {
     bool double_check = false;
 };
 
+// Move decoding helpers for the compact 16-bit move format.
 constexpr Square from_sq(Move m) noexcept {
     return static_cast<Square>((m >> 6) & 63);
 }
@@ -190,7 +194,7 @@ inline void scored_movelist_push(ScoredMoveList& list, Move m, i32 score) noexce
 }
 
 /*
-    Attack helpers
+    Attack and king-safety helpers
 */
 Bitboard attackers_to(
     const Position& pos,

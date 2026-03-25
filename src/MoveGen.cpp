@@ -28,6 +28,13 @@ SOFTWARE.
 
 #include <bit>
 
+/*
+This file builds legal move lists from bitboards plus precomputed attack tables.
+It first derives side-to-move context (checkers, pins, danger squares, masks),
+then uses specialized generators for evasions, non-evasions, and the final
+legality filter.
+*/
+
 namespace valerain {
 
 namespace {
@@ -62,6 +69,8 @@ inline AttackBitboard attacks_by_color_on_occ(
     Color by,
     Bitboard occupied
 ) noexcept {
+    // Aggregate every attack for one side on a supplied occupancy map. This is
+    // used for danger maps, legality checks, and king-move filtering.
     Bitboard attacks = 0ULL;
 
     Bitboard pawns   = pieces_bb(pos, by, PAWN);
@@ -152,6 +161,7 @@ inline Bitboard pin_mask_for(
     const GenInfo& info,
     Square from
 ) noexcept {
+    // A pinned piece may only move along the line between the king and the pinner.
     return (info.pinned & bb_of(from)) ? line_bb(mem, info.king_sq, from) : ~0ULL;
 }
 
@@ -257,6 +267,7 @@ inline Move* generate_white_pawn_evasions(
     const GenInfo& info,
     Move* out
 ) noexcept {
+    // In check, pawn moves are limited to captures of the checker or pushes that block the ray.
     Bitboard pawns = pieces_bb(pos, WHITE, PAWN);
 
     while (pawns) {
@@ -855,6 +866,8 @@ Bitboard checkers_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
+    // Squares attacking our king determine whether we are in check and how
+    // evasions must be constrained.
     const Color them = opposite(us);
     return attackers_to_color(pos, mem, pos.king_sq[us], them, pos.occupied);
 }
@@ -896,6 +909,7 @@ void init_gen_info(
     const Position& pos,
     const memory::Memory& mem
 ) noexcept {
+    // Precompute the common masks once so each generation mode can reuse them.
     info.us   = static_cast<Color>(pos.side_to_move);
     info.them = opposite(info.us);
 
@@ -968,6 +982,7 @@ Move* generate_captures(
     const memory::Memory& mem,
     Move* out
 ) noexcept {
+    // The current interface derives captures from the full legal list for simplicity.
     Move legal_list[MAX_MOVES];
     Move* end = generate_legal(pos, mem, legal_list);
 
@@ -1038,6 +1053,8 @@ Move* generate_legal(
     const memory::Memory& mem,
     Move* out
 ) noexcept {
+    // Generate pseudo-legal moves first, then keep only the moves that leave
+    // the king safe according to the fast legality checker.
     GenInfo info{};
     init_gen_info(info, pos, mem);
 

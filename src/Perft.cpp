@@ -38,11 +38,18 @@ SOFTWARE.
 namespace valerain {
 namespace {
 
+/*
+Perft walks the legal move tree exactly. The serial version is the reference,
+while the multithreaded version only parallelizes a shallow frontier expansion
+before delegating the remaining leaves back to the serial routine.
+*/
+
 constexpr const char* kAnsiRed = "\x1b[31m";
 constexpr const char* kAnsiGreen = "\x1b[32m";
 constexpr const char* kAnsiReset = "\x1b[0m";
 
 NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth) {
+    // Classical reference perft: generate legal moves, copy-make, recurse.
     if (depth <= 0) return 1;
 
     MoveList list{};
@@ -263,6 +270,7 @@ void expand_frontier_once(
     std::vector<PerftTask>& out,
     NodeCount& finished_nodes
 ) {
+    // Expand one wave of tasks so the multithreaded path has enough work to distribute.
     out.clear();
 
     for (const PerftTask& task : in) {
@@ -306,7 +314,8 @@ NodeCount perft_mt(
         return perft_serial(pos, mem, depth);
 
     // 关键改动：
-    // 不再只按 root moves 分任务，而是先浅层展开出足够多的 frontier tasks。
+    // Do not split work only by root move. Instead, expand a small frontier
+    // first so the thread pool receives enough evenly sized tasks.
     constexpr int max_split_ply = 2;
     const std::size_t target_tasks = std::max<std::size_t>(threads * 16, 128);
 
@@ -369,6 +378,7 @@ void divide(const Position& pos,
             std::ostream& os,
             std::size_t threads,
             bool live) {
+    // Divide reports the node count under each legal root move.
     const PerftDivideResult result = compute_divide_result(pos, mem, depth, threads, live, os);
 
     if (!live) {

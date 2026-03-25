@@ -22,9 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// This is Attack.cpp
-// Stage 3: backend-ready slider table scaffolding + BMI2/PEXT backend.
-
 #include "Attack.h"
 
 #include <array>
@@ -40,6 +37,11 @@ SOFTWARE.
     #define VALERAIN_CAN_COMPILE_PEXT 0
     #define VALERAIN_TARGET_BMI2
 #endif
+
+/*
+This file implements the slider attack backends. It can fall back to classical
+ray scans, use dense lookup tables, or exploit BMI2/PEXT when available.
+*/
 
 namespace valerain {
 
@@ -63,6 +65,7 @@ std::vector<AttackBitboard> g_rook_table;
 bool g_slider_tables_ready = false;
 
 
+// March a ray square by square until the board edge or the first blocker.
 inline AttackBitboard scan_ray(
     int sq,
     int df,
@@ -242,6 +245,7 @@ void init_slider_table(
     AttackBitboard (*mask_fn)(int) noexcept,
     AttackBitboard (*attack_fn)(int, AttackBitboard) noexcept
 ) {
+    // Build a dense occupancy-indexed lookup table for each source square.
     entries.fill({});
 
     std::size_t total_size = 0;
@@ -319,6 +323,7 @@ AttackBackendVTable g_attack_backend {
 
 void attack_init_backend(memory::Memory& mem) noexcept {
     (void)mem;
+    // Initialize shared tables once, then pick the fastest available backend.
     init_slider_tables();
     attack_auto_select_backend();
 }
@@ -432,6 +437,7 @@ AttackBitboard bishop_xray_attacks(
     AttackBitboard occupied,
     AttackBitboard blockers
 ) noexcept {
+    // X-ray attacks keep looking beyond the first screened blocker.
     const AttackBitboard attacks = bishop_attacks(mem, sq, occupied);
     const AttackBitboard screened = attacks & blockers;
 

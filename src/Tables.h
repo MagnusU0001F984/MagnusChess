@@ -31,7 +31,14 @@ SOFTWARE.
 
 namespace valerain {
 
+/*
+This file owns the static lookup tables that are expensive to rebuild during
+search: leaper attacks, geometry masks, distance tables, and Zobrist keys.
+Everything is initialized once and then shared through memory::Memory.
+*/
+
 struct ZobristTables {
+    // Piece-square Zobrist keys indexed by color, piece type, and square.
     Key piece[COLOR_NB][PIECE_NB][SQ_NB]{};
     Key castling[16]{};
     Key ep_file[8]{};
@@ -39,6 +46,7 @@ struct ZobristTables {
 };
 
 struct Tables {
+    // Leaper attack masks and board geometry helpers.
     Bitboard king_attacks[SQ_NB]{};
     Bitboard knight_attacks[SQ_NB]{};
     Bitboard pawn_attacks[COLOR_NB][SQ_NB]{};
@@ -53,6 +61,7 @@ struct Tables {
     bool initialized = false;
 };
 
+// Small constexpr math helpers used while building geometry tables.
 constexpr int abs_i(int x) noexcept {
     return x < 0 ? -x : x;
 }
@@ -225,6 +234,8 @@ inline void tables_init_zobrist(ZobristTables& z, u64 seed = 0xC0FFEE1234567890U
 }
 
 inline void tables_init(Tables& t, u64 zobrist_seed = 0xC0FFEE1234567890ULL) noexcept {
+    // Initialize every shared table in a single place so callers only need one
+    // setup entry point.
     tables_init_leapers(t);
     tables_init_geometry(t);
     tables_init_zobrist(t.zobrist, zobrist_seed);

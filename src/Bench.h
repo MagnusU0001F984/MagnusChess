@@ -33,11 +33,18 @@ SOFTWARE.
 
 namespace valerain {
 
+/*
+Bench mode is the command-line utility layer used for quick perft checks and
+simple fixed-depth search smoke tests outside of UCI.
+*/
+
 struct BenchConfig {
     int perft_depth = 10;
+    int search_depth = 6;
     std::size_t hash_mb = 64ULL;
     std::size_t threads = 1ULL;
     bool divide = false;
+    bool search = false;
     bool live_divide = false;
 };
 
@@ -48,6 +55,8 @@ struct PerftBenchResult {
     double nps = 0.0;
     std::size_t threads = 1ULL;
 };
+
+// Creates the classical initial chess position used by perft and bench mode.
 void set_start_position(Position& pos) noexcept;
 
 [[nodiscard]] PerftBenchResult benchmark_perft(

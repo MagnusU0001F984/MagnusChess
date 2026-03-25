@@ -25,12 +25,43 @@ SOFTWARE.
 #include "Position.h"
 #include "Evaluation.h"
 #include "MoveGen.h"
+#include "Tables.h"
 
 #include <bit>
+
+/*
+This file owns board-state mutation. It keeps mailbox, bitboards, king caches,
+incremental evaluation, and optional incremental Zobrist hashing consistent
+through the same small set of mutator helpers.
+*/
 
 namespace valerain {
 
 namespace {
+
+/*
+These helpers keep the incremental Zobrist key maintenance localized. The
+plain board mutators stay oblivious to hashing, while the keyed copy-make path
+can layer hash updates on top of the same structural operations.
+*/
+inline void key_xor_piece(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    pos.key ^= tables.zobrist.piece[color][piece_type][sq];
+}
+
+inline void key_xor_castling(Position& pos, const Tables& tables) noexcept {
+    pos.key ^= tables.zobrist.castling[pos.castling_rights];
+}
+
+inline void key_xor_ep(Position& pos, const Tables& tables) noexcept {
+    if (has_ep(pos))
+        pos.key ^= tables.zobrist.ep_file[file_of(pos.ep_sq)];
+}
 
 inline void clear_castling_rights_by_square(Position& pos, Square sq) noexcept {
     switch (sq) {
@@ -49,9 +80,48 @@ inline void remove_piece_at(Position& pos, Square sq) noexcept {
     position_remove_piece(pos, color_of(pc), type_of(pc), sq);
 }
 
+inline void remove_piece_at(
+    Position& pos,
+    const Tables& tables,
+    Square sq
+) noexcept {
+    const Piece pc = piece_on(pos, sq);
+    if (pc == PIECE_NONE) return;
+
+    const Color color = color_of(pc);
+    const PieceType piece_type = type_of(pc);
+    key_xor_piece(pos, tables, color, piece_type, sq);
+    position_remove_piece(pos, color, piece_type, sq);
+}
+
+inline void move_piece_with_key(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square from,
+    Square to
+) noexcept {
+    key_xor_piece(pos, tables, color, piece_type, from);
+    key_xor_piece(pos, tables, color, piece_type, to);
+    position_move_piece(pos, color, piece_type, from, to);
+}
+
+inline void put_piece_with_key(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    key_xor_piece(pos, tables, color, piece_type, sq);
+    position_put_piece(pos, color, piece_type, sq);
+}
+
 } // namespace
 
 void position_clear(Position& pos) noexcept {
+    // Reset every representation so the position can be rebuilt from scratch.
     pos.side_to_move = WHITE;
     pos.ep_sq = NO_SQ;
     pos.castling_rights = 0;
@@ -73,6 +143,7 @@ void position_clear(Position& pos) noexcept {
     pos.eval_eg[WHITE] = 0;
     pos.eval_eg[BLACK] = 0;
     pos.eval_phase = 0;
+    pos.key = 0;
 
     for (int sq = 0; sq < SQ_NB; ++sq)
         pos.board[sq] = PIECE_NONE;
@@ -93,12 +164,50 @@ void position_refresh_king_squares(Position& pos) noexcept {
     if (bk) pos.king_sq[BLACK] = static_cast<Square>(std::countr_zero(bk));
 }
 
+Key position_compute_key(const Position& pos, const Tables& tables) noexcept {
+    // Full recomputation is used for validation and root refreshes. Search
+    // normally relies on the incremental key maintained by do_move_copy(..., tables).
+    Key key = 0;
+
+    for (int color = WHITE; color <= BLACK; ++color) {
+        for (int piece_type = PAWN; piece_type <= KING; ++piece_type) {
+            Bitboard bb = pieces(
+                pos,
+                static_cast<Color>(color),
+                static_cast<PieceType>(piece_type)
+            );
+
+            while (bb) {
+                const Square sq = static_cast<Square>(std::countr_zero(bb));
+                key ^= tables.zobrist.piece[color][piece_type][sq];
+                bb &= bb - 1;
+            }
+        }
+    }
+
+    key ^= tables.zobrist.castling[pos.castling_rights];
+
+    if (has_ep(pos))
+        key ^= tables.zobrist.ep_file[file_of(pos.ep_sq)];
+
+    if (pos.side_to_move == BLACK)
+        key ^= tables.zobrist.side;
+
+    return key;
+}
+
+void position_refresh_key(Position& pos, const Tables& tables) noexcept {
+    pos.key = position_compute_key(pos, tables);
+}
+
 void position_put_piece(
     Position& pos,
     Color color,
     PieceType piece_type,
     Square sq
 ) noexcept {
+    // Update mailbox, bitboards, occupancy, king square cache, and eval cache
+    // together so all board views remain consistent.
     const Bitboard bb = bb_of(sq);
 
     pos.color_bb[color] |= bb;
@@ -136,6 +245,8 @@ void position_move_piece(
     Square from,
     Square to
 ) noexcept {
+    // A move on the same piece type can be expressed as xor on the source and
+    // destination bits, which keeps the update branch-free.
     const Bitboard from_bb = bb_of(from);
     const Bitboard to_bb   = bb_of(to);
 
@@ -184,6 +295,8 @@ bool position_board_matches_bitboards(const Position& pos) noexcept {
 }
 
 void do_move_copy(Position& pos, Move m) noexcept {
+    // Plain copy-make used by perft and validation paths that do not need the
+    // incremental Zobrist key.
     const Color us = static_cast<Color>(pos.side_to_move);
     const Color them = (us == WHITE ? BLACK : WHITE);
 
@@ -253,6 +366,88 @@ void do_move_copy(Position& pos, Move m) noexcept {
     }
 
     pos.side_to_move = them;
+}
+
+void do_move_copy(Position& pos, Move m, const Tables& tables) noexcept {
+    // Search uses this overload so copy-make updates board state, incremental
+    // eval, and the Zobrist key in one pass.
+    const Color us = static_cast<Color>(pos.side_to_move);
+    const Color them = static_cast<Color>(us ^ 1);
+
+    const Square from = from_sq(m);
+    const Square to   = to_sq(m);
+    const u16 flag    = move_flag(m);
+
+    const Piece moving = piece_on(pos, from);
+    const PieceType pt = type_of(moving);
+
+    if (pt == PAWN || move_is_capture(m) || move_is_ep(m))
+        pos.halfmove_clock = 0;
+    else
+        ++pos.halfmove_clock;
+
+    if (us == BLACK)
+        ++pos.fullmove_number;
+
+    key_xor_castling(pos, tables);
+    key_xor_ep(pos, tables);
+
+    pos.ep_sq = NO_SQ;
+
+    clear_castling_rights_by_square(pos, from);
+    clear_castling_rights_by_square(pos, to);
+
+    if (pt == KING) {
+        if (us == WHITE) pos.castling_rights &= ~(WHITE_OO | WHITE_OOO);
+        else             pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
+    }
+
+    if (flag == MOVE_OO) {
+        if (us == WHITE) {
+            move_piece_with_key(pos, tables, WHITE, KING, 4, 6);
+            move_piece_with_key(pos, tables, WHITE, ROOK, 7, 5);
+        } else {
+            move_piece_with_key(pos, tables, BLACK, KING, 60, 62);
+            move_piece_with_key(pos, tables, BLACK, ROOK, 63, 61);
+        }
+    }
+    else if (flag == MOVE_OOO) {
+        if (us == WHITE) {
+            move_piece_with_key(pos, tables, WHITE, KING, 4, 2);
+            move_piece_with_key(pos, tables, WHITE, ROOK, 0, 3);
+        } else {
+            move_piece_with_key(pos, tables, BLACK, KING, 60, 58);
+            move_piece_with_key(pos, tables, BLACK, ROOK, 56, 59);
+        }
+    }
+    else if (flag == MOVE_EP) {
+        const Square cap_sq = (us == WHITE) ? (to - 8) : (to + 8);
+        remove_piece_at(pos, tables, cap_sq);
+        move_piece_with_key(pos, tables, us, PAWN, from, to);
+    }
+    else if (move_is_promotion(m)) {
+        if (move_is_capture(m))
+            remove_piece_at(pos, tables, to);
+
+        key_xor_piece(pos, tables, us, PAWN, from);
+        position_remove_piece(pos, us, PAWN, from);
+        put_piece_with_key(pos, tables, us, promo_piece(m), to);
+    }
+    else {
+        if (move_is_capture(m))
+            remove_piece_at(pos, tables, to);
+
+        move_piece_with_key(pos, tables, us, pt, from, to);
+
+        if (flag == MOVE_DOUBLE_PUSH)
+            pos.ep_sq = (us == WHITE) ? (from + 8) : (from - 8);
+    }
+
+    pos.side_to_move = them;
+
+    key_xor_castling(pos, tables);
+    key_xor_ep(pos, tables);
+    pos.key ^= tables.zobrist.side;
 }
 
 } // namespace valerain

@@ -30,11 +30,18 @@ SOFTWARE.
 
 namespace valerain::nnue {
 
+/*
+Thin wrapper around the embedded NNUE reader and evaluator. Search can switch
+between HCE and NNUE through this interface without caring about file format
+details or score conversion.
+*/
+
 struct WinRateParams {
     double a;
     double b;
 };
 
+// Network lifetime management.
 bool load(const std::string& path);
 void unload() noexcept;
 bool loaded() noexcept;
@@ -42,6 +49,7 @@ const std::string& path() noexcept;
 const std::string& description() noexcept;
 const std::string& last_error() noexcept;
 
+// Raw NNUE output and helper conversions back into engine-centric units.
 int eval(const Position& pos) noexcept;
 WinRateParams win_rate_params(const Position& pos) noexcept;
 int to_cp(int v, const Position& pos) noexcept;

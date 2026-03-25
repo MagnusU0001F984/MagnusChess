@@ -41,6 +41,12 @@ SOFTWARE.
 namespace valerain::nnue {
 namespace {
 
+/*
+This NNUE reader/evaluator implements a compact Stockfish-compatible small
+network path: load the transformer and bucket layers, build HalfKA features for
+both perspectives, then run the bucketed forward pass.
+*/
+
 using std::int8_t;
 using std::int16_t;
 using std::int32_t;
@@ -278,6 +284,7 @@ bool read_header(std::istream& in, uint32_t expected_hash, std::string& desc, st
 }
 
 void build_accumulator(const Position& pos, Color perspective, int bucket, int32_t* acc, int32_t& psqt) {
+    // Rebuild the transformed feature accumulator from scratch for one perspective.
     const Square ksq = king_square(pos, perspective);
     for (int i = 0; i < kTransformedDims; ++i)
         acc[i] = g_net.ft_bias[i];
@@ -297,6 +304,8 @@ void build_accumulator(const Position& pos, Color perspective, int bucket, int32
 }
 
 void transform_features(const Position& pos, int bucket, uint8_t* out, int32_t& psqt_out) {
+    // Combine both perspectives and reorder the transformed features exactly as
+    // the small-network forward pass expects them.
     alignas(64) int32_t acc[COLOR_NB][kTransformedDims];
     int32_t psqt[COLOR_NB] = {0, 0};
 
@@ -319,6 +328,7 @@ void transform_features(const Position& pos, int bucket, uint8_t* out, int32_t& 
 }
 
 int propagate_bucket(const BucketData& net, const uint8_t* tf) noexcept {
+    // Run the small fully connected network for the selected material bucket.
     int32_t fc0[kFc0LayerOutputs];
     for (int o = 0; o < kFc0LayerOutputs; ++o) {
         int32_t sum = net.fc0_bias[o];
@@ -407,6 +417,7 @@ bool load_bucket(std::istream& in, BucketData& b, std::string& error) {
 } // namespace
 
 bool load(const std::string& path) {
+    // Loading fully resets the previous network state before parsing a new file.
     unload();
 
     std::ifstream in(path, std::ios::binary);
@@ -461,6 +472,8 @@ int eval(const Position& pos) noexcept {
     if (!g_net.is_loaded)
         return 0;
 
+    // Piece count selects the bucket; the final output is blended with the
+    // PSQT term and rescaled back to the network's native unit.
     const int piece_count = std::popcount(static_cast<uint64_t>(pieces(pos)));
     const int bucket = clampi((piece_count - 1) / 4, 0, kBuckets - 1);
 
@@ -491,6 +504,7 @@ WinRateParams win_rate_params(const Position& pos) noexcept {
 }
 
 int to_cp(int v, const Position& pos) noexcept {
+    // Convert NNUE's native value into centipawns using the fitted win-rate model.
     auto [a, b] = win_rate_params(pos);
     (void)b;
     return static_cast<int>(std::round(100.0 * static_cast<double>(v) / a));

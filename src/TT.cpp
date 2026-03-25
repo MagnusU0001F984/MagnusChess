@@ -27,6 +27,12 @@ SOFTWARE.
 #include <bit>
 #include <cstring>
 
+/*
+The TT implementation focuses on a cheap probe path: compare four 32-bit tags
+at once, prefer empty lanes when possible, and otherwise replace the weakest
+entry based on depth, age, and bound quality.
+*/
+
 namespace valerain::memory {
 
 namespace {
@@ -36,6 +42,7 @@ namespace {
 }
 
 [[nodiscard]] inline int lane_mask4_eq_u32_sse(const u32* ptr, u32 tag32) noexcept {
+    // Compare the four lane tags in parallel and return a 4-bit match mask.
     const __m128i tags = _mm_loadu_si128(reinterpret_cast<const __m128i*>(ptr));
     const __m128i want = _mm_set1_epi32(static_cast<int>(tag32));
     const __m128i cmp  = _mm_cmpeq_epi32(tags, want);
@@ -80,6 +87,7 @@ namespace {
     int lane,
     u8 current_age
 ) noexcept {
+    // Deeper, newer, exact, and PV entries are more expensive to overwrite.
     const int age_penalty = static_cast<int>(static_cast<u8>(current_age - c.age[lane]));
     const int exact_bonus = ((c.flags[lane] & 0x3U) == BOUND_EXACT) ? 8 : 0;
     const int pv_bonus    = (c.flags[lane] & 0x4U) ? 4 : 0;
@@ -202,6 +210,8 @@ void tt_prefetch(const TT& tt, Key key) noexcept {
 }
 
 TTProbe tt_probe(TT& tt, Key key) noexcept {
+    // Probe returns both the hit data (if any) and the slot that should be
+    // updated on save, so the caller only hashes once.
     TTProbe res{};
     if (!tt.clusters) return res;
 
@@ -244,6 +254,7 @@ void tt_save(
     Bound bound,
     bool pv
 ) noexcept {
+    // Replacement is conservative when the existing entry is deeper and more exact.
     if (!tt.clusters) return;
 
     TTProbe pr = tt_probe(tt, key);

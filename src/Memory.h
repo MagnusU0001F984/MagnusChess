@@ -22,8 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-//Memory 
-
 #pragma once
 
 #include <algorithm>
@@ -38,6 +36,12 @@ SOFTWARE.
 #include "TT.h"
 
 namespace valerain::memory {
+
+/*
+Memory bundles together all shared engine state that is expensive to allocate
+or initialize repeatedly: attack tables, the transposition table, and auxiliary
+pawn/material hash tables reserved for evaluation-related caching.
+*/
 
 using ::valerain::u8;
 using ::valerain::u16;
@@ -70,6 +74,7 @@ inline std::size_t pow2_capacity_from_bytes(std::size_t bytes) noexcept {
 }
 
 struct PawnHashEntry {
+    // Placeholder structure for future pawn-structure caching.
     Key key = 0;
     i16 mg_score = 0;
     i16 eg_score = 0;
@@ -107,6 +112,7 @@ inline void pawn_table_resize_mb(PawnTable& t, std::size_t mb) {
 }
 
 struct MaterialHashEntry {
+    // Placeholder structure for future material-imbalance caching.
     Key key = 0;
     i16 phase = 0;
     i16 imbalance = 0;
@@ -142,6 +148,7 @@ inline void material_table_resize_mb(MaterialTable& t, std::size_t mb) {
 }
 
 struct Memory {
+    // Shared immutable tables plus mutable hash storage used by search.
     Tables tables{};
     TT tt{};
     PawnTable pawn{};
