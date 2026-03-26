@@ -24,103 +24,55 @@ SOFTWARE.
 
 #include "History.h"
 
+#include <algorithm>
 #include <cstring>
 
 namespace valerain::search {
 
-namespace {
-
-constexpr i32 HISTORY_LIMIT = 32767;
-
-[[nodiscard]] inline bool valid_ply(int ply) noexcept {
-    return ply >= 0 && ply < MAX_PLY;
+DepthClass depth_class(int depth) noexcept {
+    if (depth <= 3) return DepthClass::Shallow;
+    if (depth <= 8) return DepthClass::Medium;
+    return DepthClass::Deep;
 }
 
-} // namespace
-
-void HistoryTable::clear() noexcept {
-    std::memset(killers, 0, sizeof(killers));
-    std::memset(quiet, 0, sizeof(quiet));
+SeeClass classify_see(int see_value, bool gives_check, bool is_promotion) noexcept {
+    if (is_promotion) return SeeClass::Promo;
+    if (gives_check) return SeeClass::Check;
+    if (see_value <= -100) return SeeClass::LossBig;
+    if (see_value < 0) return SeeClass::LossSmall;
+    if (see_value == 0) return SeeClass::Equal;
+    if (see_value < 200) return SeeClass::GainSmall;
+    return SeeClass::GainBig;
 }
 
-Move HistoryTable::killer(int ply, int slot) const noexcept {
-    if (!valid_ply(ply) || slot < 0 || slot > 1)
-        return Move(0);
-
-    return killers[ply][slot];
+int history_bonus(int depth) noexcept {
+    const int d = std::max(1, depth);
+    return d * d;
 }
 
-i32 HistoryTable::quiet_value(const Position& pos, Move move) const noexcept {
-    if (move_is_capture(move))
-        return 0;
-
-    const Color side = static_cast<Color>(pos.side_to_move);
-    const PieceType pt = piece_type_on(pos, from_sq(move));
-    if (!is_ok(side) || !is_ok(pt))
-        return 0;
-
-    return quiet[side][pt][to_sq(move)];
+int history_penalty(int depth) noexcept {
+    return history_bonus(depth) * 4;
 }
 
-void HistoryTable::bonus(const Position& pos, Move move, int depth) noexcept {
-    if (move_is_capture(move))
-        return;
-
-    const Color side = static_cast<Color>(pos.side_to_move);
-    const PieceType pt = piece_type_on(pos, from_sq(move));
-    if (!is_ok(side) || !is_ok(pt))
-        return;
-
-    i32& h = quiet[side][pt][to_sq(move)];
-    h += static_cast<i32>(depth * depth);
-    if (h > HISTORY_LIMIT)
-        h = HISTORY_LIMIT;
-}
-
-void HistoryTable::penalty(const Position& pos, Move move, int depth) noexcept {
-    if (move_is_capture(move))
-        return;
-
-    const Color side = static_cast<Color>(pos.side_to_move);
-    const PieceType pt = piece_type_on(pos, from_sq(move));
-    if (!is_ok(side) || !is_ok(pt))
-        return;
-
-    i32& h = quiet[side][pt][to_sq(move)];
-    h -= static_cast<i32>(depth * depth * 4);
-    if (h < -HISTORY_LIMIT)
-        h = -HISTORY_LIMIT;
-}
-
-void HistoryTable::penalize_quiets(
-    const Position& pos,
-    const Move* quiets,
-    int count,
-    Move excluded_move,
-    int depth
-) noexcept {
-    for (int i = 0; i < count; ++i) {
-        if (quiets[i] == excluded_move)
-            continue;
-        penalty(pos, quiets[i], depth);
+int see_immediate_term(int see_value, SeeScalePreset preset) noexcept {
+    switch (preset) {
+        case SeeScalePreset::Weak:
+            return std::clamp(see_value / 4, -75, 75);
+        case SeeScalePreset::Medium:
+            return std::clamp(see_value / 2, -150, 150);
+        case SeeScalePreset::Strong:
+            return std::clamp(see_value, -300, 300);
+        default:
+            return std::clamp(see_value / 2, -150, 150);
     }
 }
 
-void HistoryTable::reward_cutoff(
-    const Position& pos,
-    Move move,
-    int depth,
-    int ply
-) noexcept {
-    if (move_is_capture(move))
-        return;
-
-    if (valid_ply(ply) && killers[ply][0] != move) {
-        killers[ply][1] = killers[ply][0];
-        killers[ply][0] = move;
-    }
-
-    bonus(pos, move, depth);
+void HistoryTables::clear() noexcept {
+    killers = {};
+    quiet = {};
+    capture = {};
+    countermove = {};
+    see_bias = {};
 }
 
 } // namespace valerain::search

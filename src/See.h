@@ -30,8 +30,30 @@ SOFTWARE.
 
 namespace valerain::search {
 
+// Static exchange value of a capture move in centipawns.
+[[nodiscard]] int see_value(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept;
+
+// Fast path for hot search code. Caller should pass a legal capture move.
+[[nodiscard]] int see_value_fast(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept;
+
 // Returns whether a capture is expected to score at least `threshold`.
 [[nodiscard]] bool see_ge(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move,
+    int threshold
+) noexcept;
+
+// Fast path for search hot loops. Caller should pass a legal capture move.
+[[nodiscard]] bool see_ge_fast(
     const Position& pos,
     const memory::Memory& mem,
     Move move,

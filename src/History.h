@@ -24,6 +24,9 @@ SOFTWARE.
 
 #pragma once
 
+#include <algorithm>
+#include <cstdint>
+
 #include "MoveGen.h"
 #include "Position.h"
 #include "Search.h"
@@ -31,36 +34,171 @@ SOFTWARE.
 
 namespace valerain::search {
 
+enum class SeeClass : std::uint8_t {
+    LossBig = 0,
+    LossSmall,
+    Equal,
+    GainSmall,
+    GainBig,
+    Promo,
+    Check,
+    Count
+};
+
+enum class DepthClass : std::uint8_t {
+    Shallow = 0,
+    Medium,
+    Deep,
+    Count
+};
+
+enum class SeeScalePreset : std::uint8_t {
+    Weak = 0,
+    Medium,
+    Strong
+};
+
+struct KillerTable {
+    Move table[MAX_PLY][2]{};
+};
+
+struct QuietHistoryTable {
+    i16 value[COLOR_NB][SQ_NB][SQ_NB]{};
+};
+
+struct CaptureHistoryTable {
+    i16 value[COLOR_NB][PIECE_TYPE_NB][SQ_NB][PIECE_TYPE_NB]{};
+};
+
+struct CounterMoveTable {
+    Move value[COLOR_NB][SQ_NB][SQ_NB]{};
+};
+
+struct SeeBiasTable {
+    i16 value[static_cast<int>(DepthClass::Count)][static_cast<int>(SeeClass::Count)]{};
+};
+
+[[nodiscard]] DepthClass depth_class(int depth) noexcept;
+[[nodiscard]] SeeClass classify_see(int see_value, bool gives_check, bool is_promotion) noexcept;
+[[nodiscard]] int history_bonus(int depth) noexcept;
+[[nodiscard]] int history_penalty(int depth) noexcept;
+[[nodiscard]] int see_immediate_term(int see_value, SeeScalePreset preset) noexcept;
+
 /*
-HistoryTable stores killer moves and quiet-move history used for move ordering
-and pruning decisions in the main search.
+HistoryTables separates quiet and capture experience, while keeping killers and
+countermove hints in one place for move ordering and light pruning signals.
 */
-struct HistoryTable {
-    Move killers[MAX_PLY][2]{};
-    i32 quiet[COLOR_NB][PIECE_TYPE_NB][SQ_NB]{};
+struct HistoryTables {
+    KillerTable killers{};
+    QuietHistoryTable quiet{};
+    CaptureHistoryTable capture{};
+    CounterMoveTable countermove{};
+    SeeBiasTable see_bias{}; // Reserved for step-3 integration.
 
     void clear() noexcept;
 
-    [[nodiscard]] Move killer(int ply, int slot) const noexcept;
-    [[nodiscard]] i32 quiet_value(const Position& pos, Move move) const noexcept;
+    [[nodiscard]] inline Move killer_fast(int ply, int slot) const noexcept {
+        return killers.table[ply][slot];
+    }
+    [[nodiscard]] inline i32 quiet_value_fast(const Position& pos, Move move) const noexcept {
+        if (move_is_capture(move))
+            return 0;
 
-    void bonus(const Position& pos, Move move, int depth) noexcept;
-    void penalty(const Position& pos, Move move, int depth) noexcept;
+        const Color side = static_cast<Color>(pos.side_to_move);
+        return quiet.value[side][from_sq(move)][to_sq(move)];
+    }
+    [[nodiscard]] inline i32 capture_value_fast(const Position& pos, Move move) const noexcept {
+        if (!move_is_capture(move))
+            return 0;
 
-    void penalize_quiets(
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType mover = piece_type_on(pos, from_sq(move));
+        const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
+        return capture.value[side][mover][to_sq(move)][captured];
+    }
+
+    inline void bonus_fast(const Position& pos, Move move, int depth) noexcept {
+        if (move_is_capture(move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        i16& h = quiet.value[side][from_sq(move)][to_sq(move)];
+        const i32 next = static_cast<i32>(h) + history_bonus(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
+    inline void penalty_fast(const Position& pos, Move move, int depth) noexcept {
+        if (move_is_capture(move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        i16& h = quiet.value[side][from_sq(move)][to_sq(move)];
+        const i32 next = static_cast<i32>(h) - history_penalty(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
+    inline void bonus_capture_fast(const Position& pos, Move move, int depth) noexcept {
+        if (!move_is_capture(move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType mover = piece_type_on(pos, from_sq(move));
+        const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
+        i16& h = capture.value[side][mover][to_sq(move)][captured];
+        const i32 next = static_cast<i32>(h) + history_bonus(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
+    inline void penalty_capture_fast(const Position& pos, Move move, int depth) noexcept {
+        if (!move_is_capture(move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType mover = piece_type_on(pos, from_sq(move));
+        const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
+        i16& h = capture.value[side][mover][to_sq(move)][captured];
+        const i32 next = static_cast<i32>(h) - history_penalty(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
+
+    inline void penalize_quiets_fast(
         const Position& pos,
         const Move* quiets,
         int count,
         Move excluded_move,
         int depth
-    ) noexcept;
+    ) noexcept {
+        for (int i = 0; i < count; ++i)
+            if (quiets[i] != excluded_move)
+                penalty_fast(pos, quiets[i], depth);
+    }
+    inline void penalize_captures_fast(
+        const Position& pos,
+        const Move* caps,
+        int count,
+        Move excluded_move,
+        int depth
+    ) noexcept {
+        for (int i = 0; i < count; ++i)
+            if (caps[i] != excluded_move)
+                penalty_capture_fast(pos, caps[i], depth);
+    }
 
-    void reward_cutoff(
+    inline void reward_cutoff_fast(
         const Position& pos,
         Move move,
         int depth,
         int ply
-    ) noexcept;
+    ) noexcept {
+        if (move_is_capture(move)) {
+            bonus_capture_fast(pos, move, depth);
+            return;
+        }
+
+        if (killers.table[ply][0] != move) {
+            killers.table[ply][1] = killers.table[ply][0];
+            killers.table[ply][0] = move;
+        }
+
+        bonus_fast(pos, move, depth);
+    }
 };
 
 } // namespace valerain::search

@@ -24,7 +24,8 @@ SOFTWARE.
 
 #include "See.h"
 
-#include <bit>
+#include <algorithm>
+#include <cassert>
 
 #include "Attack.h"
 
@@ -35,8 +36,158 @@ namespace {
 constexpr int see_piece_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 20000
 };
+constexpr int SEE_MAX_SWAPS = 32;
+
+[[nodiscard]] inline Bitboard lsb_bit(Bitboard bb) noexcept {
+    return bb & (0ULL - bb);
+}
+
+[[nodiscard]] inline bool pick_lva_attacker(
+    Bitboard side_attackers,
+    const Bitboard piece_bb[PIECE_NB],
+    PieceType& attacker,
+    Bitboard& from_set
+) noexcept {
+    Bitboard by_pt = side_attackers & piece_bb[PAWN];
+    if (by_pt) {
+        attacker = PAWN;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    by_pt = side_attackers & piece_bb[KNIGHT];
+    if (by_pt) {
+        attacker = KNIGHT;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    by_pt = side_attackers & piece_bb[BISHOP];
+    if (by_pt) {
+        attacker = BISHOP;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    by_pt = side_attackers & piece_bb[ROOK];
+    if (by_pt) {
+        attacker = ROOK;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    by_pt = side_attackers & piece_bb[QUEEN];
+    if (by_pt) {
+        attacker = QUEEN;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    by_pt = side_attackers & piece_bb[KING];
+    if (by_pt) {
+        attacker = KING;
+        from_set = lsb_bit(by_pt);
+        return true;
+    }
+
+    return false;
+}
 
 } // namespace
+
+int see_value(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    if (!move_is_capture(move))
+        return 0;
+
+    return see_value_fast(pos, mem, move);
+}
+
+int see_value_fast(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    assert(move_is_capture(move));
+
+    const Color us = static_cast<Color>(pos.side_to_move);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
+    const auto& piece_bb = pos.piece_bb;
+    const auto& color_bb = pos.color_bb;
+
+    PieceType moving = piece_type_on(pos, from);
+    if (!is_ok(moving))
+        return 0;
+
+    const PieceType captured = move_is_ep(move)
+        ? PAWN
+        : piece_type_on(pos, to);
+    if (!is_ok(captured))
+        return 0;
+
+    int gain[SEE_MAX_SWAPS]{};
+    int depth = 0;
+    gain[0] = see_piece_value[captured];
+
+    if (move_is_promotion(move)) {
+        const PieceType promo = promo_piece(move);
+        if (!is_ok(promo))
+            return 0;
+        gain[0] += see_piece_value[promo] - see_piece_value[PAWN];
+        moving = promo;
+    }
+
+    PieceType next_victim = moving;
+
+    Bitboard occupied = pos.occupied ^ bb_of(from);
+    if (move_is_ep(move)) {
+        const Square cap_sq = (us == WHITE) ? (to - 8) : (to + 8);
+        occupied ^= bb_of(cap_sq);
+    } else {
+        occupied ^= bb_of(to);
+    }
+
+    const Bitboard bishop_like = piece_bb[BISHOP] | piece_bb[QUEEN];
+    const Bitboard rook_like = piece_bb[ROOK] | piece_bb[QUEEN];
+    Bitboard attackers = attackers_to(pos, mem, to, occupied);
+    Color side = static_cast<Color>(us ^ 1);
+
+    while (true) {
+        const Bitboard side_attackers = (attackers & occupied) & color_bb[side];
+        if (side_attackers == 0ULL || depth + 1 >= SEE_MAX_SWAPS)
+            break;
+
+        PieceType attacker = PIECE_TYPE_NONE;
+        Bitboard from_set = 0ULL;
+        if (!pick_lva_attacker(side_attackers, piece_bb, attacker, from_set))
+            break;
+
+        const int prev = depth;
+        ++depth;
+        gain[depth] = see_piece_value[next_victim] - gain[prev];
+        next_victim = attacker;
+
+        occupied ^= from_set;
+
+        if (attacker == PAWN || attacker == BISHOP || attacker == QUEEN)
+            attackers |= bishop_attacks(mem, to, occupied) & bishop_like;
+        if (attacker == ROOK || attacker == QUEEN)
+            attackers |= rook_attacks(mem, to, occupied) & rook_like;
+
+        side = static_cast<Color>(side ^ 1);
+    }
+
+    while (depth > 0) {
+        gain[depth - 1] = -std::max(-gain[depth - 1], gain[depth]);
+        --depth;
+    }
+
+    return gain[0];
+}
 
 bool see_ge(
     const Position& pos,
@@ -47,9 +198,22 @@ bool see_ge(
     if (!move_is_capture(move))
         return threshold <= 0;
 
+    return see_ge_fast(pos, mem, move, threshold);
+}
+
+bool see_ge_fast(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move,
+    int threshold
+) noexcept {
+    assert(move_is_capture(move));
+
     const Color us = static_cast<Color>(pos.side_to_move);
     const Square from = from_sq(move);
     const Square to = to_sq(move);
+    const auto& piece_bb = pos.piece_bb;
+    const auto& color_bb = pos.color_bb;
     const PieceType moving = piece_type_on(pos, from);
     if (!is_ok(moving))
         return false;
@@ -86,57 +250,19 @@ bool see_ge(
         occupied ^= bb_of(to);
     }
 
-    const Bitboard bishop_like = pos.piece_bb[BISHOP] | pos.piece_bb[QUEEN];
-    const Bitboard rook_like = pos.piece_bb[ROOK] | pos.piece_bb[QUEEN];
+    const Bitboard bishop_like = piece_bb[BISHOP] | piece_bb[QUEEN];
+    const Bitboard rook_like = piece_bb[ROOK] | piece_bb[QUEEN];
     Bitboard attackers = attackers_to(pos, mem, to, occupied);
 
     Color side = static_cast<Color>(us ^ 1);
     while (true) {
-        attackers &= occupied;
-        const Bitboard side_attackers = attackers & pos.color_bb[side];
+        const Bitboard side_attackers = (attackers & occupied) & color_bb[side];
         if (side_attackers == 0ULL)
             break;
 
         PieceType attacker = PIECE_TYPE_NONE;
         Bitboard from_set = 0ULL;
-
-        Bitboard by_pt = side_attackers & pos.piece_bb[PAWN];
-        if (by_pt) {
-            attacker = PAWN;
-            from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-        } else {
-            by_pt = side_attackers & pos.piece_bb[KNIGHT];
-            if (by_pt) {
-                attacker = KNIGHT;
-                from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-            } else {
-                by_pt = side_attackers & pos.piece_bb[BISHOP];
-                if (by_pt) {
-                    attacker = BISHOP;
-                    from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-                } else {
-                    by_pt = side_attackers & pos.piece_bb[ROOK];
-                    if (by_pt) {
-                        attacker = ROOK;
-                        from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-                    } else {
-                        by_pt = side_attackers & pos.piece_bb[QUEEN];
-                        if (by_pt) {
-                            attacker = QUEEN;
-                            from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-                        } else {
-                            by_pt = side_attackers & pos.piece_bb[KING];
-                            if (by_pt) {
-                                attacker = KING;
-                                from_set = bb_of(static_cast<Square>(std::countr_zero(by_pt)));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (attacker == PIECE_TYPE_NONE)
+        if (!pick_lva_attacker(side_attackers, piece_bb, attacker, from_set))
             break;
 
         occupied ^= from_set;
@@ -146,12 +272,12 @@ bool see_ge(
         if (attacker == ROOK || attacker == QUEEN)
             attackers |= rook_attacks(mem, to, occupied) & rook_like;
 
-        attackers &= occupied;
         balance = see_piece_value[attacker] - balance;
         side = static_cast<Color>(side ^ 1);
 
         if (balance >= 0) {
-            if (attacker == KING && (attackers & pos.color_bb[side]) != 0ULL)
+            const Bitboard remaining_attackers = attackers & occupied;
+            if (attacker == KING && (remaining_attackers & color_bb[side]) != 0ULL)
                 side = static_cast<Color>(side ^ 1);
             break;
         }

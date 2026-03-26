@@ -60,6 +60,20 @@ constexpr int REPETITION_AVOID_SCORE = -16;
 constexpr int IIR_MIN_DEPTH = 6;
 constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
 
+#ifndef VALERAIN_SEE_TERM_PRESET
+#define VALERAIN_SEE_TERM_PRESET 1
+#endif
+
+#if VALERAIN_SEE_TERM_PRESET == 0
+constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Weak;
+#elif VALERAIN_SEE_TERM_PRESET == 1
+constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Medium;
+#elif VALERAIN_SEE_TERM_PRESET == 2
+constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
+#else
+#error "VALERAIN_SEE_TERM_PRESET must be 0 (Weak), 1 (Medium), or 2 (Strong)"
+#endif
+
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
@@ -76,7 +90,7 @@ struct Searcher {
 
     u64 nodes = 0;
     u64 base_nodes = 0;
-    HistoryTable history_tables{};
+    HistoryTables history_tables{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
@@ -260,9 +274,23 @@ struct Searcher {
                pieces(pos, side, QUEEN)  != 0ULL;
     }
 
-    inline void do_null_move(Position& pos) const noexcept {
+    struct NullMoveState {
+        int side_to_move;
+        Square ep_sq;
+        int halfmove_clock;
+        int fullmove_number;
+        Key key;
+    };
+
+    inline void do_null_move(Position& pos, NullMoveState& st) const noexcept {
         // A null move simply passes the turn, clears ep state, and updates the
         // key. It is used for null-move pruning only; no board pieces move.
+        st.side_to_move = pos.side_to_move;
+        st.ep_sq = pos.ep_sq;
+        st.halfmove_clock = pos.halfmove_clock;
+        st.fullmove_number = pos.fullmove_number;
+        st.key = pos.key;
+
         if (has_ep(pos))
             pos.key ^= mem.tables.zobrist.ep_file[file_of(pos.ep_sq)];
 
@@ -273,6 +301,14 @@ struct Searcher {
         pos.ep_sq = NO_SQ;
         pos.side_to_move ^= 1;
         pos.key ^= mem.tables.zobrist.side;
+    }
+
+    inline void undo_null_move(Position& pos, const NullMoveState& st) const noexcept {
+        pos.side_to_move = st.side_to_move;
+        pos.ep_sq = st.ep_sq;
+        pos.halfmove_clock = st.halfmove_clock;
+        pos.fullmove_number = st.fullmove_number;
+        pos.key = st.key;
     }
 
     [[nodiscard]] inline Move tt_move_from_probe(
@@ -363,18 +399,22 @@ struct Searcher {
             const PieceType victim = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
             const int attacker_value = is_ok(attacker) ? piece_order_value[attacker] : 0;
             const int victim_value = is_ok(victim) ? piece_order_value[victim] : 0;
-            return 20'000'000 + victim_value * 32 - attacker_value;
+            const int immediate_see_term =
+                see_immediate_term(search::see_value(pos, mem, move), SEE_TERM_PRESET);
+            return 20'000'000 + victim_value * 32 - attacker_value
+                + history_tables.capture_value_fast(pos, move)
+                + immediate_see_term;
         }
 
         if (move_is_promotion(move))
             return 19'000'000 + piece_order_value[promo_piece(move)];
 
-        if (move == history_tables.killer(ply, 0))
+        if (move == history_tables.killer_fast(ply, 0))
             return 18'000'000;
-        if (move == history_tables.killer(ply, 1))
+        if (move == history_tables.killer_fast(ply, 1))
             return 17'999'000;
 
-        return history_tables.quiet_value(pos, move);
+        return history_tables.quiet_value_fast(pos, move);
     }
 
     inline void score_moves(
@@ -449,8 +489,8 @@ struct Searcher {
                 alpha = static_eval;
         }
 
-        MoveList list{};
-        GenInfo info{};
+        MoveList list;
+        GenInfo info;
         init_gen_info(info, pos, mem);
         Move* qend = generate_pseudo_captures(pos, mem, info, list.moves);
         list.size = static_cast<int>(qend - list.moves);
@@ -461,7 +501,7 @@ struct Searcher {
             return score;
         }
 
-        ScoredMoveList scored{};
+        ScoredMoveList scored;
         score_moves(pos, list, scored, tt_move, ply);
 
         Move best_move = 0;
@@ -486,7 +526,7 @@ struct Searcher {
                     continue;
             }
 
-            StateInfo st{};
+            StateInfo st;
             make_move(pos, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, pos.key);
 
@@ -599,18 +639,19 @@ struct Searcher {
             has_non_pawn_material(pos, side)) {
             // Null-move pruning tests whether simply passing still keeps the
             // position above beta. If so, the real position is likely also a cutoff.
-            Position null_pos = pos;
-            do_null_move(null_pos);
+            NullMoveState null_state;
+            do_null_move(pos, null_state);
 
             const int reduction = null_reduction(search_depth);
             const int score = -pvs(
-                null_pos,
+                pos,
                 search_depth - 1 - reduction,
                 -beta,
                 -beta + 1,
                 ply + 1,
                 false
             );
+            undo_null_move(pos, null_state);
 
             if (score >= beta) {
                 save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
@@ -618,13 +659,13 @@ struct Searcher {
             }
         }
 
-        MoveList list{};
-        GenInfo info{};
+        MoveList list;
+        GenInfo info;
         init_gen_info(info, pos, mem);
         Move* pend = generate_pseudo_legal(pos, mem, info, list.moves);
         list.size = static_cast<int>(pend - list.moves);
 
-        ScoredMoveList scored{};
+        ScoredMoveList scored;
         score_moves(pos, list, scored, tt_move, ply);
 
         bool searched_first = false;
@@ -633,6 +674,8 @@ struct Searcher {
         int quiet_count = 0;
         Move searched_quiets[MAX_MOVES];
         int searched_quiet_count = 0;
+        Move searched_captures[MAX_MOVES];
+        int searched_capture_count = 0;
         bool cutoff = false;
 
         for (int i = 0; i < scored.size; ++i) {
@@ -652,7 +695,7 @@ struct Searcher {
                 move_is_capture(move) &&
                 !move_is_promotion(move);
             const int history_score = quiet_move
-                ? history_tables.quiet_value(pos, move)
+                ? history_tables.quiet_value_fast(pos, move)
                 : 0;
 
             if (quiet_move)
@@ -698,7 +741,7 @@ struct Searcher {
                 continue;
             }
 
-            StateInfo st{};
+            StateInfo st;
             make_move(pos, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, pos.key);
 
@@ -741,14 +784,19 @@ struct Searcher {
 
             if (quiet_move)
                 searched_quiets[searched_quiet_count++] = move;
+            if (move_is_capture(move))
+                searched_captures[searched_capture_count++] = move;
 
             if (score > alpha) {
                 alpha = score;
                 best_move = move;
                 update_pv(ply, move);
                 if (alpha >= beta) {
-                    history_tables.reward_cutoff(pos, move, depth, ply);
-                    history_tables.penalize_quiets(pos, searched_quiets, searched_quiet_count, move, depth);
+                    history_tables.reward_cutoff_fast(pos, move, depth, ply);
+                    if (move_is_capture(move))
+                        history_tables.penalize_captures_fast(pos, searched_captures, searched_capture_count, move, depth);
+                    else
+                        history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, move, depth);
                     cutoff = true;
                     break;
                 }
@@ -763,10 +811,15 @@ struct Searcher {
 
         if (!cutoff &&
             alpha > alpha0 &&
-            best_move != 0 &&
-            !move_is_capture(best_move)) {
-            history_tables.bonus(pos, best_move, std::max(1, search_depth - 1));
-            history_tables.penalize_quiets(pos, searched_quiets, searched_quiet_count, best_move, std::max(1, search_depth - 1));
+            best_move != 0) {
+            const int hist_depth = std::max(1, search_depth - 1);
+            if (move_is_capture(best_move)) {
+                history_tables.bonus_capture_fast(pos, best_move, hist_depth);
+                history_tables.penalize_captures_fast(pos, searched_captures, searched_capture_count, best_move, hist_depth);
+            } else {
+                history_tables.bonus_fast(pos, best_move, hist_depth);
+                history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, best_move, hist_depth);
+            }
         }
 
         save_tt(pos, search_depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
@@ -785,14 +838,15 @@ struct Searcher {
         result.depth = depth;
         rep_keys[0] = root.key;
 
-        MoveList list{};
-        GenInfo info{};
+        MoveList list;
+        GenInfo info;
         init_gen_info(info, root, mem);
         Move* rend = generate_pseudo_legal(root, mem, info, list.moves);
         list.size = static_cast<int>(rend - list.moves);
 
         if (limits.root_move_count > 0) {
-            MoveList filtered{};
+            MoveList filtered;
+            filtered.size = 0;
             for (int i = 0; i < list.size; ++i) {
                 const Move move = list.moves[i];
                 bool allowed = false;
@@ -815,7 +869,7 @@ struct Searcher {
         const int alpha0 = alpha;
         const bool checked = in_check(root);
 
-        ScoredMoveList scored{};
+        ScoredMoveList scored;
         score_moves(root, list, scored, root_hint, 0);
         int best_score = -VALUE_INF;
         int legal_count = 0;
@@ -830,7 +884,7 @@ struct Searcher {
                 continue;
 
             ++legal_count;
-            StateInfo st{};
+            StateInfo st;
             make_move(root, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, root.key);
 
