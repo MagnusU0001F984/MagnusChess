@@ -31,7 +31,8 @@ namespace valerain::search {
 
 DepthClass depth_class(int depth) noexcept {
     if (depth <= 3) return DepthClass::Shallow;
-    if (depth <= 8) return DepthClass::Medium;
+    if (depth <= 6) return DepthClass::MediumLow;
+    if (depth <= 10) return DepthClass::MediumHigh;
     return DepthClass::Deep;
 }
 
@@ -43,6 +44,16 @@ SeeClass classify_see(int see_value, bool gives_check, bool is_promotion) noexce
     if (see_value == 0) return SeeClass::Equal;
     if (see_value < 200) return SeeClass::GainSmall;
     return SeeClass::GainBig;
+}
+
+SeeClass classify_see_bias(int see_value) noexcept {
+    if (see_value < VALERAIN_SEE_BIAS_BAD_THRESHOLD)
+        return SeeClass::LossSmall;
+    if (see_value > VALERAIN_SEE_BIAS_GOOD_BIG_THRESHOLD)
+        return SeeClass::GainBig;
+    if (see_value > VALERAIN_SEE_BIAS_EQ_THRESHOLD)
+        return SeeClass::GainSmall;
+    return SeeClass::Equal;
 }
 
 int history_bonus(int depth) noexcept {
@@ -72,6 +83,7 @@ void HistoryTables::clear() noexcept {
     quiet = {};
     capture = {};
     countermove = {};
+    continuation = {};
     see_bias = {};
 }
 

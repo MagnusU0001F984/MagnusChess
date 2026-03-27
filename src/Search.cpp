@@ -31,6 +31,7 @@ SOFTWARE.
 
 #include "Evaluation.h"
 #include "History.h"
+#include "MovePicker.h"
 #include "MoveGen.h"
 #include "Nnue.h"
 #include "See.h"
@@ -59,6 +60,17 @@ constexpr int ASPIRATION_DELTA = 24;
 constexpr int REPETITION_AVOID_SCORE = -16;
 constexpr int IIR_MIN_DEPTH = 6;
 constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
+constexpr int CAPTURE_HISTORY_HIGH_THRESHOLD = 128;
+constexpr int CAPTURE_TOPK = 3;
+constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH = 4;
+constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH = 8;
+constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
+
+#ifndef VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD
+#define VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD -60
+#endif
+constexpr int SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD =
+    VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD;
 
 #ifndef VALERAIN_SEE_TERM_PRESET
 #define VALERAIN_SEE_TERM_PRESET 1
@@ -74,9 +86,33 @@ constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
 #error "VALERAIN_SEE_TERM_PRESET must be 0 (Weak), 1 (Medium), or 2 (Strong)"
 #endif
 
+#ifndef VALERAIN_CAPTURE_OBS
+// #define VALERAIN_CAPTURE_OBS 1
+#define VALERAIN_CAPTURE_OBS 0
+#endif
+
+#ifndef VALERAIN_SEE_LATE_BAD_CAPTURE_GATE
+#define VALERAIN_SEE_LATE_BAD_CAPTURE_GATE 1
+#endif
+
+#ifndef VALERAIN_MOVEPICKER_OBS
+#define VALERAIN_MOVEPICKER_OBS 1
+#endif
+
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
+
+[[nodiscard]] static inline int mvv_lva_capture_term(
+    const Position& pos,
+    Move move
+) noexcept {
+    const PieceType attacker = piece_type_on(pos, from_sq(move));
+    const PieceType victim = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
+    const int attacker_value = is_ok(attacker) ? piece_order_value[attacker] : 0;
+    const int victim_value = is_ok(victim) ? piece_order_value[victim] : 0;
+    return victim_value * 32 - attacker_value;
+}
 
 /*
 Searcher owns the mutable state for one iterative-deepening session: node
@@ -94,12 +130,399 @@ struct Searcher {
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
+    Move move_stack[MAX_PLY]{};
     clock::time_point start_time{};
     bool stopped = false;
     bool hard_stop = false;
 
+#if VALERAIN_CAPTURE_OBS
+    struct CaptureObservation {
+        u64 main_capture_searches = 0;
+        u64 main_capture_cutoffs = 0;
+        u64 q_capture_searches = 0;
+        u64 q_capture_cutoffs = 0;
+
+        u64 topk_tried[CAPTURE_TOPK]{};
+        u64 topk_cutoff[CAPTURE_TOPK]{};
+
+        u64 main_see_tried[3]{};
+        u64 main_see_cutoff[3]{};
+        u64 q_see_tried[3]{};
+        u64 q_see_cutoff[3]{};
+
+        u64 main_high_hist_tried = 0;
+        u64 main_high_hist_cutoff = 0;
+        u64 q_high_hist_tried = 0;
+        u64 q_high_hist_cutoff = 0;
+
+        i64 topk_rank_shift_sum[CAPTURE_TOPK]{};
+        u64 topk_rank_shift_count[CAPTURE_TOPK]{};
+
+        u64 gate_checks = 0;
+        u64 gate_bad_see = 0;
+        u64 gate_pruned = 0;
+        u64 gate_exempt_check = 0;
+        u64 gate_exempt_recapture = 0;
+
+        u64 cap_lmr_late_simple_total = 0;
+        u64 cap_lmr_eligible = 0;
+        u64 cap_lmr_considered = 0;
+        u64 cap_lmr_reduced = 0;
+        u64 cap_lmr_reduced_r1 = 0;
+        u64 cap_lmr_reduced_r2 = 0;
+        u64 cap_lmr_research = 0;
+        u64 cap_lmr_research_r1 = 0;
+        u64 cap_lmr_research_r2 = 0;
+        u64 cap_lmr_considered_see[3]{};
+        u64 cap_lmr_reduced_see[3]{};
+        u64 cap_lmr_research_see[3]{};
+    } cap_obs{};
+#endif
+
+#if VALERAIN_MOVEPICKER_OBS
+    enum class MoveStageBucket : std::uint8_t {
+        TT = 0,
+        GoodCapture,
+        Killer,
+        Quiet,
+        BadCapture,
+        Count
+    };
+
+    struct MovePickerObservation {
+        u64 nodes = 0;
+        u64 nodes_with_tt_probe = 0;
+        u64 tt_first_try = 0;
+        u64 tt_first_cutoff = 0;
+
+        u64 cutoffs_total = 0;
+        u64 cutoff_by_stage[static_cast<int>(MoveStageBucket::Count)]{};
+
+        u64 first_good_capture_try = 0;
+        u64 first_good_capture_cutoff = 0;
+        u64 first_killer_try = 0;
+        u64 first_killer_cutoff = 0;
+        u64 first_quiet_try = 0;
+        u64 first_quiet_cutoff = 0;
+    } mp_obs{};
+#endif
+
     explicit Searcher(memory::Memory& m, const SearchLimits& l) noexcept
         : mem(m), limits(l) {}
+
+#if VALERAIN_CAPTURE_OBS
+    [[nodiscard]] static inline int see_bucket(int see_value) noexcept {
+        if (see_value < 0) return 0;
+        if (see_value == 0) return 1;
+        return 2;
+    }
+
+    [[nodiscard]] static inline int ratio_percent(u64 num, u64 den) noexcept {
+        if (den == 0) return 0;
+        return static_cast<int>((num * 100ULL) / den);
+    }
+
+    [[nodiscard]] static inline int lookup_capture_base_rank(
+        Move move,
+        const Move* cap_moves,
+        const int* cap_ranks,
+        int cap_count
+    ) noexcept {
+        for (int i = 0; i < cap_count; ++i) {
+            if (cap_moves[i] == move)
+                return cap_ranks[i];
+        }
+        return 0;
+    }
+
+    inline void record_main_capture_try(
+        int capture_order,
+        int see_value,
+        int capture_hist,
+        int base_rank
+    ) noexcept {
+        ++cap_obs.main_capture_searches;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.main_see_tried[bucket];
+        if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
+            ++cap_obs.main_high_hist_tried;
+
+        if (capture_order >= 0 && capture_order < CAPTURE_TOPK) {
+            ++cap_obs.topk_tried[capture_order];
+            if (base_rank > 0) {
+                cap_obs.topk_rank_shift_sum[capture_order] += static_cast<i64>(base_rank - (capture_order + 1));
+                ++cap_obs.topk_rank_shift_count[capture_order];
+            }
+        }
+    }
+
+    inline void record_main_capture_cutoff(
+        int capture_order,
+        int see_value,
+        int capture_hist
+    ) noexcept {
+        ++cap_obs.main_capture_cutoffs;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.main_see_cutoff[bucket];
+        if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
+            ++cap_obs.main_high_hist_cutoff;
+        if (capture_order >= 0 && capture_order < CAPTURE_TOPK)
+            ++cap_obs.topk_cutoff[capture_order];
+    }
+
+    inline void record_q_capture_try(
+        int see_value,
+        int capture_hist
+    ) noexcept {
+        ++cap_obs.q_capture_searches;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.q_see_tried[bucket];
+        if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
+            ++cap_obs.q_high_hist_tried;
+    }
+
+    inline void record_q_capture_cutoff(
+        int see_value,
+        int capture_hist
+    ) noexcept {
+        ++cap_obs.q_capture_cutoffs;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.q_see_cutoff[bucket];
+        if (capture_hist >= CAPTURE_HISTORY_HIGH_THRESHOLD)
+            ++cap_obs.q_high_hist_cutoff;
+    }
+
+    inline void record_gate_check(
+        bool bad_see,
+        bool pruned,
+        bool exempt_check,
+        bool exempt_recapture
+    ) noexcept {
+        ++cap_obs.gate_checks;
+        if (bad_see)
+            ++cap_obs.gate_bad_see;
+        if (pruned)
+            ++cap_obs.gate_pruned;
+        if (exempt_check)
+            ++cap_obs.gate_exempt_check;
+        if (exempt_recapture)
+            ++cap_obs.gate_exempt_recapture;
+    }
+
+    inline void record_cap_lmr_considered(
+        int see_value,
+        int reduction
+    ) noexcept {
+        ++cap_obs.cap_lmr_considered;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.cap_lmr_considered_see[bucket];
+
+        if (reduction <= 0)
+            return;
+
+        ++cap_obs.cap_lmr_reduced;
+        ++cap_obs.cap_lmr_reduced_see[bucket];
+        if (reduction == 1)
+            ++cap_obs.cap_lmr_reduced_r1;
+        else
+            ++cap_obs.cap_lmr_reduced_r2;
+    }
+
+    inline void record_cap_lmr_research(
+        int see_value,
+        int reduction
+    ) noexcept {
+        if (reduction <= 0)
+            return;
+
+        ++cap_obs.cap_lmr_research;
+        const int bucket = see_bucket(see_value);
+        ++cap_obs.cap_lmr_research_see[bucket];
+        if (reduction == 1)
+            ++cap_obs.cap_lmr_research_r1;
+        else
+            ++cap_obs.cap_lmr_research_r2;
+    }
+
+    inline void emit_capture_observation(std::ostream& out) const {
+        const auto sb_raw = [&](DepthClass dc, SeeClass sc) -> int {
+            return static_cast<int>(
+                history_tables.see_bias.value[static_cast<int>(dc)][static_cast<int>(sc)]
+            );
+        };
+        const auto sb_term = [](int raw) -> int {
+            return std::clamp(raw / 4, -96, 96);
+        };
+
+        out << "info string capobs main_capture "
+            << cap_obs.main_capture_cutoffs << '/' << cap_obs.main_capture_searches
+            << " (" << ratio_percent(cap_obs.main_capture_cutoffs, cap_obs.main_capture_searches) << "%)"
+            << " q_capture "
+            << cap_obs.q_capture_cutoffs << '/' << cap_obs.q_capture_searches
+            << " (" << ratio_percent(cap_obs.q_capture_cutoffs, cap_obs.q_capture_searches) << "%)\n";
+
+        out << "info string capobs topk "
+            << "k1 " << cap_obs.topk_cutoff[0] << '/' << cap_obs.topk_tried[0]
+            << " (" << ratio_percent(cap_obs.topk_cutoff[0], cap_obs.topk_tried[0]) << "%) "
+            << "k2 " << cap_obs.topk_cutoff[1] << '/' << cap_obs.topk_tried[1]
+            << " (" << ratio_percent(cap_obs.topk_cutoff[1], cap_obs.topk_tried[1]) << "%) "
+            << "k3 " << cap_obs.topk_cutoff[2] << '/' << cap_obs.topk_tried[2]
+            << " (" << ratio_percent(cap_obs.topk_cutoff[2], cap_obs.topk_tried[2]) << "%)\n";
+
+        out << "info string capobs see_cutoff_rate "
+            << "main_bad " << cap_obs.main_see_cutoff[0] << '/' << cap_obs.main_see_tried[0]
+            << " (" << ratio_percent(cap_obs.main_see_cutoff[0], cap_obs.main_see_tried[0]) << "%) "
+            << "main_eq " << cap_obs.main_see_cutoff[1] << '/' << cap_obs.main_see_tried[1]
+            << " (" << ratio_percent(cap_obs.main_see_cutoff[1], cap_obs.main_see_tried[1]) << "%) "
+            << "main_good " << cap_obs.main_see_cutoff[2] << '/' << cap_obs.main_see_tried[2]
+            << " (" << ratio_percent(cap_obs.main_see_cutoff[2], cap_obs.main_see_tried[2]) << "%) "
+            << "q_bad " << cap_obs.q_see_cutoff[0] << '/' << cap_obs.q_see_tried[0]
+            << " (" << ratio_percent(cap_obs.q_see_cutoff[0], cap_obs.q_see_tried[0]) << "%) "
+            << "q_eq " << cap_obs.q_see_cutoff[1] << '/' << cap_obs.q_see_tried[1]
+            << " (" << ratio_percent(cap_obs.q_see_cutoff[1], cap_obs.q_see_tried[1]) << "%) "
+            << "q_good " << cap_obs.q_see_cutoff[2] << '/' << cap_obs.q_see_tried[2]
+            << " (" << ratio_percent(cap_obs.q_see_cutoff[2], cap_obs.q_see_tried[2]) << "%)\n";
+
+        out << "info string capobs gate "
+            << "checked " << cap_obs.gate_checks
+            << " bad_see " << cap_obs.gate_bad_see
+            << " pruned " << cap_obs.gate_pruned
+            << " (" << ratio_percent(cap_obs.gate_pruned, cap_obs.gate_checks) << "%)"
+            << " exempt_check " << cap_obs.gate_exempt_check
+            << " exempt_recapture " << cap_obs.gate_exempt_recapture << '\n';
+
+        out << "info string capobs caplmr "
+            << "late_simple " << cap_obs.cap_lmr_late_simple_total
+            << " eligible " << cap_obs.cap_lmr_eligible
+            << " considered " << cap_obs.cap_lmr_considered
+            << " reduced " << cap_obs.cap_lmr_reduced
+            << " (r1 " << cap_obs.cap_lmr_reduced_r1 << " r2 " << cap_obs.cap_lmr_reduced_r2 << ")"
+            << " re_search " << cap_obs.cap_lmr_research
+            << " (r1 " << cap_obs.cap_lmr_research_r1 << " r2 " << cap_obs.cap_lmr_research_r2 << ")\n";
+
+        out << "info string capobs caplmr_by_see "
+            << "considered bad " << cap_obs.cap_lmr_considered_see[0]
+            << " eq " << cap_obs.cap_lmr_considered_see[1]
+            << " good " << cap_obs.cap_lmr_considered_see[2]
+            << " | reduced bad " << cap_obs.cap_lmr_reduced_see[0]
+            << " eq " << cap_obs.cap_lmr_reduced_see[1]
+            << " good " << cap_obs.cap_lmr_reduced_see[2]
+            << " | re_search bad " << cap_obs.cap_lmr_research_see[0]
+            << " eq " << cap_obs.cap_lmr_research_see[1]
+            << " good " << cap_obs.cap_lmr_research_see[2] << '\n';
+
+        const int sb_s_bad = sb_raw(DepthClass::Shallow, SeeClass::LossSmall);
+        const int sb_s_eq = sb_raw(DepthClass::Shallow, SeeClass::Equal);
+        const int sb_s_good_s = sb_raw(DepthClass::Shallow, SeeClass::GainSmall);
+        const int sb_s_good_b = sb_raw(DepthClass::Shallow, SeeClass::GainBig);
+        const int sb_ml_bad = sb_raw(DepthClass::MediumLow, SeeClass::LossSmall);
+        const int sb_ml_eq = sb_raw(DepthClass::MediumLow, SeeClass::Equal);
+        const int sb_ml_good_s = sb_raw(DepthClass::MediumLow, SeeClass::GainSmall);
+        const int sb_ml_good_b = sb_raw(DepthClass::MediumLow, SeeClass::GainBig);
+        const int sb_mh_bad = sb_raw(DepthClass::MediumHigh, SeeClass::LossSmall);
+        const int sb_mh_eq = sb_raw(DepthClass::MediumHigh, SeeClass::Equal);
+        const int sb_mh_good_s = sb_raw(DepthClass::MediumHigh, SeeClass::GainSmall);
+        const int sb_mh_good_b = sb_raw(DepthClass::MediumHigh, SeeClass::GainBig);
+        const int sb_d_bad = sb_raw(DepthClass::Deep, SeeClass::LossSmall);
+        const int sb_d_eq = sb_raw(DepthClass::Deep, SeeClass::Equal);
+        const int sb_d_good_s = sb_raw(DepthClass::Deep, SeeClass::GainSmall);
+        const int sb_d_good_b = sb_raw(DepthClass::Deep, SeeClass::GainBig);
+
+        out << "info string capobs see_bias_raw "
+            << "shallow bad " << sb_s_bad << " eq " << sb_s_eq
+            << " good_s " << sb_s_good_s << " good_b " << sb_s_good_b
+            << " | med_low bad " << sb_ml_bad << " eq " << sb_ml_eq
+            << " good_s " << sb_ml_good_s << " good_b " << sb_ml_good_b
+            << " | med_high bad " << sb_mh_bad << " eq " << sb_mh_eq
+            << " good_s " << sb_mh_good_s << " good_b " << sb_mh_good_b
+            << " | deep bad " << sb_d_bad << " eq " << sb_d_eq
+            << " good_s " << sb_d_good_s << " good_b " << sb_d_good_b << '\n';
+
+        out << "info string capobs see_bias_term "
+            << "shallow bad " << sb_term(sb_s_bad) << " eq " << sb_term(sb_s_eq)
+            << " good_s " << sb_term(sb_s_good_s) << " good_b " << sb_term(sb_s_good_b)
+            << " | med_low bad " << sb_term(sb_ml_bad) << " eq " << sb_term(sb_ml_eq)
+            << " good_s " << sb_term(sb_ml_good_s) << " good_b " << sb_term(sb_ml_good_b)
+            << " | med_high bad " << sb_term(sb_mh_bad) << " eq " << sb_term(sb_mh_eq)
+            << " good_s " << sb_term(sb_mh_good_s) << " good_b " << sb_term(sb_mh_good_b)
+            << " | deep bad " << sb_term(sb_d_bad) << " eq " << sb_term(sb_d_eq)
+            << " good_s " << sb_term(sb_d_good_s) << " good_b " << sb_term(sb_d_good_b)
+            << '\n';
+
+        out << "info string capobs capture_hist_high "
+            << "main " << cap_obs.main_high_hist_cutoff << '/' << cap_obs.main_high_hist_tried
+            << " (" << ratio_percent(cap_obs.main_high_hist_cutoff, cap_obs.main_high_hist_tried) << "%) "
+            << "q " << cap_obs.q_high_hist_cutoff << '/' << cap_obs.q_high_hist_tried
+            << " (" << ratio_percent(cap_obs.q_high_hist_cutoff, cap_obs.q_high_hist_tried) << "%)";
+
+        for (int i = 0; i < CAPTURE_TOPK; ++i) {
+            const i64 sum = cap_obs.topk_rank_shift_sum[i];
+            const u64 cnt = cap_obs.topk_rank_shift_count[i];
+            const int avg_x100 = cnt == 0 ? 0 : static_cast<int>((sum * 100) / static_cast<i64>(cnt));
+            out << " d" << (i + 1) << "_avg_rank_shift_x100 " << avg_x100;
+        }
+        out << '\n';
+    }
+#endif
+
+#if VALERAIN_MOVEPICKER_OBS
+    [[nodiscard]] static inline int mp_ratio_percent(u64 num, u64 den) noexcept {
+        if (den == 0)
+            return 0;
+        return static_cast<int>((num * 100ULL) / den);
+    }
+
+    [[nodiscard]] static inline MoveStageBucket classify_stage_bucket(
+        Move move,
+        Move tt_move,
+        Move killer1,
+        Move killer2,
+        bool capture_move,
+        bool bad_capture
+    ) noexcept {
+        if (!move_is_none(tt_move) && move == tt_move)
+            return MoveStageBucket::TT;
+        if (capture_move)
+            return bad_capture ? MoveStageBucket::BadCapture : MoveStageBucket::GoodCapture;
+        if (move == killer1 || move == killer2)
+            return MoveStageBucket::Killer;
+        return MoveStageBucket::Quiet;
+    }
+
+    inline void emit_movepicker_observation(std::ostream& out) const {
+        const u64 tt_probe_rate_num = mp_obs.nodes_with_tt_probe;
+        const u64 tt_probe_rate_den = mp_obs.nodes;
+        const u64 tt_first_rate_num = mp_obs.tt_first_try;
+        const u64 tt_first_rate_den = mp_obs.nodes_with_tt_probe;
+        const u64 tt_first_cut_num = mp_obs.tt_first_cutoff;
+        const u64 tt_first_cut_den = mp_obs.tt_first_try;
+
+        out << "info string mpobs nodes " << mp_obs.nodes
+            << " tt_probe " << tt_probe_rate_num << '/' << tt_probe_rate_den
+            << " (" << mp_ratio_percent(tt_probe_rate_num, tt_probe_rate_den) << "%)"
+            << " tt_first_try " << tt_first_rate_num << '/' << tt_first_rate_den
+            << " (" << mp_ratio_percent(tt_first_rate_num, tt_first_rate_den) << "%)"
+            << " tt_first_cut " << tt_first_cut_num << '/' << tt_first_cut_den
+            << " (" << mp_ratio_percent(tt_first_cut_num, tt_first_cut_den) << "%)\n";
+
+        out << "info string mpobs cutoff_by_stage "
+            << "total " << mp_obs.cutoffs_total
+            << " tt " << mp_obs.cutoff_by_stage[static_cast<int>(MoveStageBucket::TT)]
+            << " goodcap " << mp_obs.cutoff_by_stage[static_cast<int>(MoveStageBucket::GoodCapture)]
+            << " killer " << mp_obs.cutoff_by_stage[static_cast<int>(MoveStageBucket::Killer)]
+            << " quiet " << mp_obs.cutoff_by_stage[static_cast<int>(MoveStageBucket::Quiet)]
+            << " badcap " << mp_obs.cutoff_by_stage[static_cast<int>(MoveStageBucket::BadCapture)]
+            << '\n';
+
+        out << "info string mpobs first_stage_cutoff_rate "
+            << "goodcap " << mp_obs.first_good_capture_cutoff << '/' << mp_obs.first_good_capture_try
+            << " (" << mp_ratio_percent(mp_obs.first_good_capture_cutoff, mp_obs.first_good_capture_try) << "%) "
+            << "killer " << mp_obs.first_killer_cutoff << '/' << mp_obs.first_killer_try
+            << " (" << mp_ratio_percent(mp_obs.first_killer_cutoff, mp_obs.first_killer_try) << "%) "
+            << "quiet " << mp_obs.first_quiet_cutoff << '/' << mp_obs.first_quiet_try
+            << " (" << mp_ratio_percent(mp_obs.first_quiet_cutoff, mp_obs.first_quiet_try) << "%)\n";
+    }
+#endif
 
     // Mate scores are stored relative to the current ply so TT hits remain
     // consistent when reused at a different depth from the root.
@@ -151,10 +574,41 @@ struct Searcher {
     }
 
     // Fixed schedules avoid expensive formulas for lightweight pruning.
-    [[nodiscard]] static inline int lmr_reduction(int depth, int move_index) noexcept {
+    [[nodiscard]] static inline int quiet_lmr_reduction(int depth, int move_index) noexcept {
         if (depth >= 6 && move_index >= 6)
             return 2;
         return 1;
+    }
+
+    [[nodiscard]] static inline bool capture_lmr_eligible(int depth, int simple_capture_index) noexcept {
+        return depth >= 4 && simple_capture_index >= 3;
+    }
+
+    [[nodiscard]] static inline int capture_lmr_reduction(
+        int depth,
+        int simple_capture_index,
+        int see_value,
+        int see_bias_term
+    ) noexcept {
+        if (!capture_lmr_eligible(depth, simple_capture_index))
+            return 0;
+
+        int reduction = 1;
+        if (depth >= 8 && simple_capture_index >= 10)
+            ++reduction;
+
+        const SeeClass sc = classify_see_bias(see_value);
+        if (sc == SeeClass::LossSmall)
+            ++reduction;
+        else if (sc == SeeClass::GainBig)
+            --reduction;
+
+        if (see_bias_term >= 48)
+            --reduction;
+        else if (see_bias_term <= -48)
+            ++reduction;
+
+        return std::clamp(reduction, 0, 2);
     }
 
     [[nodiscard]] static inline int null_reduction(int depth) noexcept {
@@ -229,6 +683,24 @@ struct Searcher {
     [[nodiscard]] bool in_check(const Position& pos) const noexcept {
         const Color side = static_cast<Color>(pos.side_to_move);
         return checkers_bb(pos, mem, side) != 0ULL;
+    }
+
+    [[nodiscard]] inline bool is_recapture_move(Move move, int ply) const noexcept {
+        if (ply <= 0)
+            return false;
+        const Move prev = move_stack[ply - 1];
+        if (move_is_none(prev))
+            return false;
+        return to_sq(move) == to_sq(prev);
+    }
+
+    [[nodiscard]] inline bool gives_check_after_move(
+        const Position& pos,
+        Move move
+    ) const noexcept {
+        Position next = pos;
+        do_move_copy(next, move, mem.tables);
+        return in_check(next);
     }
 
     [[nodiscard]] inline bool use_nnue() const noexcept {
@@ -383,7 +855,8 @@ struct Searcher {
         const Position& pos,
         Move move,
         Move tt_move,
-        int ply
+        int ply,
+        int depth
     ) const noexcept {
         // Ordering priority:
         // 1. TT move
@@ -395,15 +868,14 @@ struct Searcher {
             return 30'000'000;
 
         if (move_is_capture(move)) {
-            const PieceType attacker = piece_type_on(pos, from_sq(move));
-            const PieceType victim = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
-            const int attacker_value = is_ok(attacker) ? piece_order_value[attacker] : 0;
-            const int victim_value = is_ok(victim) ? piece_order_value[victim] : 0;
-            const int immediate_see_term =
-                see_immediate_term(search::see_value(pos, mem, move), SEE_TERM_PRESET);
-            return 20'000'000 + victim_value * 32 - attacker_value
+            const int mvv_lva_term = mvv_lva_capture_term(pos, move);
+            const int see_value = search::see_value(pos, mem, move);
+            const int immediate_see_term = see_immediate_term(see_value, SEE_TERM_PRESET);
+            const int see_bias_term = history_tables.see_bias_value_fast(depth, see_value);
+            return 20'000'000 + mvv_lva_term
                 + history_tables.capture_value_fast(pos, move)
-                + immediate_see_term;
+                + immediate_see_term
+                + see_bias_term;
         }
 
         if (move_is_promotion(move))
@@ -422,12 +894,13 @@ struct Searcher {
         const MoveList& moves,
         ScoredMoveList& scored,
         Move tt_move,
-        int ply
+        int ply,
+        int depth
     ) const noexcept {
         scored.size = moves.size;
         for (int i = 0; i < moves.size; ++i) {
             scored.moves[i].move = moves.moves[i];
-            scored.moves[i].score = score_move(pos, moves.moves[i], tt_move, ply);
+            scored.moves[i].score = score_move(pos, moves.moves[i], tt_move, ply, depth);
         }
     }
 
@@ -502,7 +975,7 @@ struct Searcher {
         }
 
         ScoredMoveList scored;
-        score_moves(pos, list, scored, tt_move, ply);
+        score_moves(pos, list, scored, tt_move, ply, 0);
 
         Move best_move = 0;
         int legal_count = 0;
@@ -526,6 +999,17 @@ struct Searcher {
                     continue;
             }
 
+#if VALERAIN_CAPTURE_OBS
+            const bool capture_move = move_is_capture(move);
+            int obs_see_value = 0;
+            int obs_capture_hist = 0;
+            if (capture_move) {
+                obs_see_value = search::see_value_fast(pos, mem, move);
+                obs_capture_hist = history_tables.capture_value_fast(pos, move);
+                record_q_capture_try(obs_see_value, obs_capture_hist);
+            }
+#endif
+
             StateInfo st;
             make_move(pos, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, pos.key);
@@ -536,8 +1020,13 @@ struct Searcher {
                 alpha = score;
                 best_move = move;
                 update_pv(ply, move);
-                if (alpha >= beta)
+                if (alpha >= beta) {
+#if VALERAIN_CAPTURE_OBS
+                    if (move_is_capture(move))
+                        record_q_capture_cutoff(obs_see_value, obs_capture_hist);
+#endif
                     break;
+                }
             }
         }
 
@@ -641,6 +1130,7 @@ struct Searcher {
             // position above beta. If so, the real position is likely also a cutoff.
             NullMoveState null_state;
             do_null_move(pos, null_state);
+            move_stack[ply] = Move(0);
 
             const int reduction = null_reduction(search_depth);
             const int score = -pvs(
@@ -659,14 +1149,59 @@ struct Searcher {
             }
         }
 
-        MoveList list;
         GenInfo info;
         init_gen_info(info, pos, mem);
-        Move* pend = generate_pseudo_legal(pos, mem, info, list.moves);
-        list.size = static_cast<int>(pend - list.moves);
+        const Move prev_move = (ply > 0) ? move_stack[ply - 1] : Move(0);
+        const Move prev2_move = (ply > 1) ? move_stack[ply - 2] : Move(0);
+        MovePicker picker(
+            pos,
+            mem,
+            info,
+            history_tables,
+            tt_move,
+            ply,
+            prev_move,
+            prev2_move,
+            search_depth
+        );
+#if VALERAIN_MOVEPICKER_OBS
+        ++mp_obs.nodes;
+        if (!move_is_none(tt_move))
+            ++mp_obs.nodes_with_tt_probe;
+        const Move killer1 = history_tables.killer_fast(ply, 0);
+        const Move killer2 = history_tables.killer_fast(ply, 1);
+        bool seen_first_good_capture = false;
+        bool seen_first_killer = false;
+        bool seen_first_quiet = false;
+#endif
 
-        ScoredMoveList scored;
-        score_moves(pos, list, scored, tt_move, ply);
+#if VALERAIN_CAPTURE_OBS
+        Move capture_moves[MAX_MOVES];
+        int capture_base_scores[MAX_MOVES];
+        int capture_base_ranks[MAX_MOVES];
+        int capture_count = 0;
+        MoveList capture_list;
+        Move* cend = generate_pseudo_captures(pos, mem, info, capture_list.moves);
+        capture_list.size = static_cast<int>(cend - capture_list.moves);
+        for (int i = 0; i < capture_list.size; ++i) {
+            const Move move = capture_list.moves[i];
+            if (!move_is_capture(move))
+                continue;
+            if (!legal_fast(pos, mem, info, move))
+                continue;
+            capture_moves[capture_count] = move;
+            capture_base_scores[capture_count] = mvv_lva_capture_term(pos, move);
+            ++capture_count;
+        }
+        for (int i = 0; i < capture_count; ++i) {
+            int rank = 1;
+            for (int j = 0; j < capture_count; ++j)
+                if (capture_base_scores[j] > capture_base_scores[i])
+                    ++rank;
+            capture_base_ranks[i] = rank;
+        }
+        int capture_search_order = 0;
+#endif
 
         bool searched_first = false;
         Move best_move = 0;
@@ -675,37 +1210,109 @@ struct Searcher {
         Move searched_quiets[MAX_MOVES];
         int searched_quiet_count = 0;
         Move searched_captures[MAX_MOVES];
+        int searched_capture_see[MAX_MOVES];
         int searched_capture_count = 0;
+        int simple_capture_count = 0;
+        int moves_tried = 0;
         bool cutoff = false;
 
-        for (int i = 0; i < scored.size; ++i) {
+        for (;;) {
             if (stopped)
                 break;
 
-            const Move move = pick_next(scored, i);
-            if (!legal_fast(pos, mem, info, move))
-                continue;
+            const Move move = picker.next();
+            if (move_is_none(move))
+                break;
 
+            ++moves_tried;
+            const int move_index = moves_tried - 1;
             ++legal_count;
+            const bool capture_move = move_is_capture(move);
+            const bool bad_capture = picker.last_was_bad_capture();
             const bool quiet_move =
-                !move_is_capture(move) &&
+                !capture_move &&
                 !move_is_promotion(move) &&
                 !move_is_castle(move);
             const bool simple_capture =
-                move_is_capture(move) &&
+                capture_move &&
                 !move_is_promotion(move);
+            int move_see_value = 0;
+            int move_see_bias_term = 0;
+            if (capture_move)
+                move_see_value = picker.last_see_value();
+            if (capture_move)
+                move_see_bias_term = history_tables.see_bias_value_fast(search_depth, move_see_value);
             const int history_score = quiet_move
                 ? history_tables.quiet_value_fast(pos, move)
                 : 0;
+#if VALERAIN_MOVEPICKER_OBS
+            const bool first_move_this = (moves_tried == 1);
+            const MoveStageBucket stage_bucket = classify_stage_bucket(
+                move, tt_move, killer1, killer2, capture_move, bad_capture
+            );
+            const bool first_good_capture_this =
+                stage_bucket == MoveStageBucket::GoodCapture && !seen_first_good_capture;
+            const bool first_killer_this =
+                stage_bucket == MoveStageBucket::Killer && !seen_first_killer;
+            const bool first_quiet_this =
+                stage_bucket == MoveStageBucket::Quiet && !seen_first_quiet;
+            if (first_move_this && stage_bucket == MoveStageBucket::TT)
+                ++mp_obs.tt_first_try;
+            if (first_good_capture_this) {
+                seen_first_good_capture = true;
+                ++mp_obs.first_good_capture_try;
+            }
+            if (first_killer_this) {
+                seen_first_killer = true;
+                ++mp_obs.first_killer_try;
+            }
+            if (first_quiet_this) {
+                seen_first_quiet = true;
+                ++mp_obs.first_quiet_try;
+            }
+#endif
 
             if (quiet_move)
                 ++quiet_count;
+            if (simple_capture)
+                ++simple_capture_count;
+
+#if VALERAIN_SEE_LATE_BAD_CAPTURE_GATE
+            if (!pv_node &&
+                !checked &&
+                simple_capture &&
+                search_depth >= SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH &&
+                search_depth <= SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH &&
+                simple_capture_count >= SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX) {
+                const bool bad_see = move_see_value < SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD;
+                [[maybe_unused]] bool pruned = false;
+                bool exempt_check = false;
+                bool exempt_recapture = false;
+
+                if (bad_see) {
+                    exempt_recapture = is_recapture_move(move, ply);
+                    if (!exempt_recapture)
+                        exempt_check = gives_check_after_move(pos, move);
+
+                    if (!exempt_recapture && !exempt_check) {
+                        pruned = true;
+#if VALERAIN_CAPTURE_OBS
+                        record_gate_check(bad_see, pruned, exempt_check, exempt_recapture);
+#endif
+                        continue;
+                    }
+                }
+#if VALERAIN_CAPTURE_OBS
+                record_gate_check(bad_see, pruned, exempt_check, exempt_recapture);
+#endif
+            }
+#endif
 
             if (!pv_node &&
                 !checked &&
                 search_depth <= SEE_PRUNE_DEPTH_LIMIT &&
                 simple_capture &&
-                i > 1 &&
+                move_index > 1 &&
                 !search::see_ge(pos, mem, move, -60 * search_depth)) {
                 // Bad capture pruning: skip late captures that fail a SEE threshold.
                 continue;
@@ -741,9 +1348,27 @@ struct Searcher {
                 continue;
             }
 
+#if VALERAIN_CAPTURE_OBS
+            int obs_capture_order = -1;
+            int obs_see_value = 0;
+            int obs_capture_hist = 0;
+            if (capture_move) {
+                obs_capture_order = capture_search_order++;
+                obs_see_value = move_see_value;
+                obs_capture_hist = history_tables.capture_value_fast(pos, move);
+                const int base_rank = lookup_capture_base_rank(
+                    move, capture_moves, capture_base_ranks, capture_count
+                );
+                record_main_capture_try(
+                    obs_capture_order, obs_see_value, obs_capture_hist, base_rank
+                );
+            }
+#endif
+
             StateInfo st;
             make_move(pos, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, pos.key);
+            move_stack[ply] = move;
 
             int score = 0;
             if (!searched_first) {
@@ -754,9 +1379,9 @@ struct Searcher {
                     !checked &&
                     quiet_move &&
                     search_depth >= 3 &&
-                    i >= 3) {
+                    move_index >= 3) {
                     // Late Move Reductions search late quiets at a reduced depth first.
-                    const int reduction = lmr_reduction(search_depth, i);
+                    const int reduction = quiet_lmr_reduction(search_depth, move_index);
                     score = -pvs(
                         pos,
                         search_depth - 1 - reduction,
@@ -770,6 +1395,46 @@ struct Searcher {
                         // If the reduced search still looks interesting, restore
                         // the original depth and test it again on a narrow window.
                         score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                } else if (!pv_node &&
+                           !checked &&
+                           simple_capture) {
+                    // Late capture reductions are intentionally conservative and only
+                    // modulated by local tactical quality and learned see-bias.
+                    const bool eligible = capture_lmr_eligible(search_depth, simple_capture_count);
+#if VALERAIN_CAPTURE_OBS
+                    ++cap_obs.cap_lmr_late_simple_total;
+                    if (eligible)
+                        ++cap_obs.cap_lmr_eligible;
+#endif
+                    if (eligible) {
+                        const int reduction = capture_lmr_reduction(
+                            search_depth, simple_capture_count, move_see_value, move_see_bias_term
+                        );
+#if VALERAIN_CAPTURE_OBS
+                        record_cap_lmr_considered(move_see_value, reduction);
+#endif
+                        if (reduction > 0) {
+                            score = -pvs(
+                                pos,
+                                search_depth - 1 - reduction,
+                                -alpha - 1,
+                                -alpha,
+                                ply + 1,
+                                true
+                            );
+
+                            if (score > alpha) {
+#if VALERAIN_CAPTURE_OBS
+                                record_cap_lmr_research(move_see_value, reduction);
+#endif
+                                score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                            }
+                        } else {
+                            score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                        }
+                    } else {
+                        score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
+                    }
                 } else {
                     score = -pvs(pos, search_depth - 1, -alpha - 1, -alpha, ply + 1, true);
                 }
@@ -784,19 +1449,64 @@ struct Searcher {
 
             if (quiet_move)
                 searched_quiets[searched_quiet_count++] = move;
-            if (move_is_capture(move))
+            if (capture_move) {
+                searched_capture_see[searched_capture_count] = move_see_value;
                 searched_captures[searched_capture_count++] = move;
+            }
 
             if (score > alpha) {
                 alpha = score;
                 best_move = move;
                 update_pv(ply, move);
                 if (alpha >= beta) {
-                    history_tables.reward_cutoff_fast(pos, move, depth, ply);
-                    if (move_is_capture(move))
+#if VALERAIN_MOVEPICKER_OBS
+                    ++mp_obs.cutoffs_total;
+                    ++mp_obs.cutoff_by_stage[static_cast<int>(stage_bucket)];
+                    if (first_move_this && stage_bucket == MoveStageBucket::TT)
+                        ++mp_obs.tt_first_cutoff;
+                    if (first_good_capture_this)
+                        ++mp_obs.first_good_capture_cutoff;
+                    if (first_killer_this)
+                        ++mp_obs.first_killer_cutoff;
+                    if (first_quiet_this)
+                        ++mp_obs.first_quiet_cutoff;
+#endif
+#if VALERAIN_CAPTURE_OBS
+                    if (capture_move)
+                        record_main_capture_cutoff(
+                            obs_capture_order, obs_see_value, obs_capture_hist
+                        );
+#endif
+                    history_tables.reward_cutoff_fast(
+                        pos,
+                        move,
+                        depth,
+                        ply,
+                        move_see_value,
+                        prev_move,
+                        prev2_move
+                    );
+                    if (capture_move)
                         history_tables.penalize_captures_fast(pos, searched_captures, searched_capture_count, move, depth);
-                    else
+                    else {
                         history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, move, depth);
+                        history_tables.penalize_continuation_quiets_fast(
+                            pos,
+                            searched_quiets,
+                            searched_quiet_count,
+                            move,
+                            prev_move,
+                            prev2_move,
+                            depth
+                        );
+                    }
+                    history_tables.penalize_see_bias_captures_fast(
+                        searched_captures,
+                        searched_capture_see,
+                        searched_capture_count,
+                        move,
+                        depth
+                    );
                     cutoff = true;
                     break;
                 }
@@ -819,7 +1529,28 @@ struct Searcher {
             } else {
                 history_tables.bonus_fast(pos, best_move, hist_depth);
                 history_tables.penalize_quiets_fast(pos, searched_quiets, searched_quiet_count, best_move, hist_depth);
+                history_tables.bonus_continuation_fast(pos, prev_move, best_move, hist_depth);
+                history_tables.bonus_continuation_fast(pos, prev2_move, best_move, std::max(1, hist_depth / 2));
+                history_tables.penalize_continuation_quiets_fast(
+                    pos,
+                    searched_quiets,
+                    searched_quiet_count,
+                    best_move,
+                    prev_move,
+                    prev2_move,
+                    hist_depth
+                );
             }
+        }
+        if (!cutoff && searched_capture_count > 0) {
+            const int fail_depth = std::max(1, search_depth - 1);
+            history_tables.penalize_see_bias_captures_fast(
+                searched_captures,
+                searched_capture_see,
+                searched_capture_count,
+                Move(0),
+                fail_depth
+            );
         }
 
         save_tt(pos, search_depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
@@ -870,7 +1601,7 @@ struct Searcher {
         const bool checked = in_check(root);
 
         ScoredMoveList scored;
-        score_moves(root, list, scored, root_hint, 0);
+        score_moves(root, list, scored, root_hint, 0, depth);
         int best_score = -VALUE_INF;
         int legal_count = 0;
         result.best_move = 0;
@@ -887,6 +1618,7 @@ struct Searcher {
             StateInfo st;
             make_move(root, move, mem.tables, st);
             memory::tt_prefetch(mem.tt, root.key);
+            move_stack[0] = move;
 
             int score = 0;
             if (i == 0) {
@@ -995,6 +1727,7 @@ SearchResult iterative_deepening(
             searcher.nodes = 0;
             searcher.base_nodes = total_nodes + depth_nodes;
             std::fill(std::begin(searcher.pv_length), std::end(searcher.pv_length), 0);
+            std::fill(std::begin(searcher.move_stack), std::end(searcher.move_stack), Move(0));
 
             current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
             depth_nodes += current.nodes;
@@ -1058,6 +1791,14 @@ SearchResult iterative_deepening(
     }
 
     best.nodes = total_nodes;
+#if VALERAIN_CAPTURE_OBS
+    if (out)
+        searcher.emit_capture_observation(*out);
+#endif
+#if VALERAIN_MOVEPICKER_OBS
+    if (out)
+        searcher.emit_movepicker_observation(*out);
+#endif
     return best;
 }
 

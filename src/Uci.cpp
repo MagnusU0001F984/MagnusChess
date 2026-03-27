@@ -620,6 +620,8 @@ void handle_setoption(
 
 int run_uci() {
     // UCI command loop with cooperative stop support.
+    std::cout << std::unitbuf;
+
     memory::Memory mem{};
     memory::memory_init(mem, 64, 8, 2);
     attack_init_backend(mem);
@@ -648,13 +650,15 @@ int run_uci() {
         search_running.store(false, std::memory_order_release);
     };
 
+    std::cout << "Valerain 0.0.3 by the Magnus developer" << std::endl;
+
     std::string line;
     while (std::getline(std::cin, line)) {
         join_finished_search();
 
         if (line == "uci") {
-            std::cout << "id name Valerain\n";
-            std::cout << "id author Mazhaoze\n";
+            std::cout << "id name Valerain 0.0.3\n";
+            std::cout << "id author Magnus\n";
             std::cout << "option name Hash type spin default 64 min 1 max 33554432\n";
             std::cout << "option name Clear Hash type button\n";
             std::cout << "option name UseNNUE type check default false\n";

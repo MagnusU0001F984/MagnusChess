@@ -34,6 +34,46 @@ SOFTWARE.
 
 namespace valerain::search {
 
+#ifndef VALERAIN_SEE_BIAS_BONUS_DIV
+#define VALERAIN_SEE_BIAS_BONUS_DIV 10
+#endif
+
+#if VALERAIN_SEE_BIAS_BONUS_DIV <= 0
+#error "VALERAIN_SEE_BIAS_BONUS_DIV must be positive"
+#endif
+
+#ifndef VALERAIN_SEE_BIAS_MED_LOW_BONUS_DIV
+#define VALERAIN_SEE_BIAS_MED_LOW_BONUS_DIV 24
+#endif
+
+#if VALERAIN_SEE_BIAS_MED_LOW_BONUS_DIV <= 0
+#error "VALERAIN_SEE_BIAS_MED_LOW_BONUS_DIV must be positive"
+#endif
+
+#ifndef VALERAIN_SEE_BIAS_FAIL_SCALE
+#define VALERAIN_SEE_BIAS_FAIL_SCALE 4
+#endif
+
+#if VALERAIN_SEE_BIAS_FAIL_SCALE <= 0
+#error "VALERAIN_SEE_BIAS_FAIL_SCALE must be positive"
+#endif
+
+#ifndef VALERAIN_SEE_BIAS_BAD_THRESHOLD
+#define VALERAIN_SEE_BIAS_BAD_THRESHOLD -50
+#endif
+
+#ifndef VALERAIN_SEE_BIAS_EQ_THRESHOLD
+#define VALERAIN_SEE_BIAS_EQ_THRESHOLD 50
+#endif
+
+#ifndef VALERAIN_SEE_BIAS_GOOD_BIG_THRESHOLD
+#define VALERAIN_SEE_BIAS_GOOD_BIG_THRESHOLD 200
+#endif
+
+#ifndef VALERAIN_COUNTERMOVE_BONUS
+#define VALERAIN_COUNTERMOVE_BONUS 4096
+#endif
+
 enum class SeeClass : std::uint8_t {
     LossBig = 0,
     LossSmall,
@@ -47,7 +87,8 @@ enum class SeeClass : std::uint8_t {
 
 enum class DepthClass : std::uint8_t {
     Shallow = 0,
-    Medium,
+    MediumLow,
+    MediumHigh,
     Deep,
     Count
 };
@@ -74,12 +115,17 @@ struct CounterMoveTable {
     Move value[COLOR_NB][SQ_NB][SQ_NB]{};
 };
 
+struct ContinuationHistoryTable {
+    i16 value[COLOR_NB][PIECE_TYPE_NB][SQ_NB][PIECE_TYPE_NB][SQ_NB]{};
+};
+
 struct SeeBiasTable {
     i16 value[static_cast<int>(DepthClass::Count)][static_cast<int>(SeeClass::Count)]{};
 };
 
 [[nodiscard]] DepthClass depth_class(int depth) noexcept;
 [[nodiscard]] SeeClass classify_see(int see_value, bool gives_check, bool is_promotion) noexcept;
+[[nodiscard]] SeeClass classify_see_bias(int see_value) noexcept;
 [[nodiscard]] int history_bonus(int depth) noexcept;
 [[nodiscard]] int history_penalty(int depth) noexcept;
 [[nodiscard]] int see_immediate_term(int see_value, SeeScalePreset preset) noexcept;
@@ -93,6 +139,7 @@ struct HistoryTables {
     QuietHistoryTable quiet{};
     CaptureHistoryTable capture{};
     CounterMoveTable countermove{};
+    ContinuationHistoryTable continuation{};
     SeeBiasTable see_bias{}; // Reserved for step-3 integration.
 
     void clear() noexcept;
@@ -115,6 +162,48 @@ struct HistoryTables {
         const PieceType mover = piece_type_on(pos, from_sq(move));
         const PieceType captured = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
         return capture.value[side][mover][to_sq(move)][captured];
+    }
+    [[nodiscard]] inline i32 see_bias_value_fast(int depth, int see_value) const noexcept {
+        const int dc = static_cast<int>(depth_class(depth));
+        const int sc = static_cast<int>(classify_see_bias(see_value));
+        const i32 raw = static_cast<i32>(see_bias.value[dc][sc]);
+        return std::clamp(raw / 4, -96, 96);
+    }
+    [[nodiscard]] inline Move countermove_fast(
+        const Position& pos,
+        Move prev_move
+    ) const noexcept {
+        if (move_is_none(prev_move))
+            return Move(0);
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        return countermove.value[side][from_sq(prev_move)][to_sq(prev_move)];
+    }
+    [[nodiscard]] inline i32 countermove_bonus_fast(
+        const Position& pos,
+        Move move,
+        Move prev_move
+    ) const noexcept {
+        if (move_is_capture(move) || move_is_none(prev_move))
+            return 0;
+
+        return countermove_fast(pos, prev_move) == move ? VALERAIN_COUNTERMOVE_BONUS : 0;
+    }
+    [[nodiscard]] inline i32 continuation_value_fast(
+        const Position& pos,
+        Move move,
+        Move prev_move
+    ) const noexcept {
+        if (move_is_capture(move) || move_is_none(prev_move))
+            return 0;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType cur_piece = piece_type_on(pos, from_sq(move));
+        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
+        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+            return 0;
+
+        return continuation.value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
     }
 
     inline void bonus_fast(const Position& pos, Move move, int depth) noexcept {
@@ -157,6 +246,78 @@ struct HistoryTables {
         const i32 next = static_cast<i32>(h) - history_penalty(depth);
         h = static_cast<i16>(std::clamp(next, -32767, 32767));
     }
+    inline void bonus_see_bias_fast(int depth, int see_value) noexcept {
+        const DepthClass dc_class = depth_class(depth);
+        const int dc = static_cast<int>(dc_class);
+        const int sc = static_cast<int>(classify_see_bias(see_value));
+        i16& h = see_bias.value[dc][sc];
+        int bonus_div = VALERAIN_SEE_BIAS_BONUS_DIV;
+        if (dc_class == DepthClass::MediumLow)
+            bonus_div = VALERAIN_SEE_BIAS_MED_LOW_BONUS_DIV;
+        const i32 bonus = std::max(1, history_bonus(depth) / bonus_div);
+        const i32 next = static_cast<i32>(h) + bonus;
+        h = static_cast<i16>(std::clamp(next, -2048, 2048));
+    }
+    inline void penalty_see_bias_fast(int depth, int see_value) noexcept {
+        const int dc = static_cast<int>(depth_class(depth));
+        const int sc = static_cast<int>(classify_see_bias(see_value));
+        i16& h = see_bias.value[dc][sc];
+        const i32 penalty =
+            history_bonus(depth) / (VALERAIN_SEE_BIAS_BONUS_DIV * VALERAIN_SEE_BIAS_FAIL_SCALE);
+        if (penalty <= 0)
+            return;
+        const i32 next = static_cast<i32>(h) - penalty;
+        h = static_cast<i16>(std::clamp(next, -2048, 2048));
+    }
+    inline void set_countermove_fast(
+        const Position& pos,
+        Move prev_move,
+        Move reply
+    ) noexcept {
+        if (move_is_none(prev_move) || move_is_none(reply) || move_is_capture(reply))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        countermove.value[side][from_sq(prev_move)][to_sq(prev_move)] = reply;
+    }
+    inline void bonus_continuation_fast(
+        const Position& pos,
+        Move prev_move,
+        Move move,
+        int depth
+    ) noexcept {
+        if (move_is_capture(move) || move_is_none(prev_move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType cur_piece = piece_type_on(pos, from_sq(move));
+        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
+        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+            return;
+
+        i16& h = continuation.value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
+        const i32 next = static_cast<i32>(h) + history_bonus(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
+    inline void penalty_continuation_fast(
+        const Position& pos,
+        Move prev_move,
+        Move move,
+        int depth
+    ) noexcept {
+        if (move_is_capture(move) || move_is_none(prev_move))
+            return;
+
+        const Color side = static_cast<Color>(pos.side_to_move);
+        const PieceType cur_piece = piece_type_on(pos, from_sq(move));
+        const PieceType prev_piece = piece_type_on(pos, to_sq(prev_move));
+        if (!is_ok(cur_piece) || !is_ok(prev_piece))
+            return;
+
+        i16& h = continuation.value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
+        const i32 next = static_cast<i32>(h) - history_penalty(depth);
+        h = static_cast<i16>(std::clamp(next, -32767, 32767));
+    }
 
     inline void penalize_quiets_fast(
         const Position& pos,
@@ -180,15 +341,72 @@ struct HistoryTables {
             if (caps[i] != excluded_move)
                 penalty_capture_fast(pos, caps[i], depth);
     }
+    inline void penalize_continuation_quiets_fast(
+        const Position& pos,
+        const Move* quiets,
+        int count,
+        Move excluded_move,
+        Move prev_move,
+        Move prev2_move,
+        int depth
+    ) noexcept {
+        for (int i = 0; i < count; ++i) {
+            if (quiets[i] == excluded_move)
+                continue;
+
+            penalty_continuation_fast(pos, prev_move, quiets[i], depth);
+            penalty_continuation_fast(pos, prev2_move, quiets[i], std::max(1, depth / 2));
+        }
+    }
+    inline void penalize_see_bias_captures_fast(
+        const Move* caps,
+        const int* cap_see_values,
+        int count,
+        Move excluded_move,
+        int depth
+    ) noexcept {
+        bool penalized_bad = false;
+        bool penalized_eq = false;
+        bool penalized_good_small = false;
+        bool penalized_good_big = false;
+
+        for (int i = 0; i < count; ++i) {
+            if (caps[i] == excluded_move)
+                continue;
+
+            const SeeClass sc = classify_see_bias(cap_see_values[i]);
+            bool* touched = nullptr;
+            if (sc == SeeClass::LossSmall)
+                touched = &penalized_bad;
+            else if (sc == SeeClass::Equal)
+                touched = &penalized_eq;
+            else if (sc == SeeClass::GainSmall)
+                touched = &penalized_good_small;
+            else if (sc == SeeClass::GainBig)
+                touched = &penalized_good_big;
+            else
+                continue;
+
+            if (*touched)
+                continue;
+
+            penalty_see_bias_fast(depth, cap_see_values[i]);
+            *touched = true;
+        }
+    }
 
     inline void reward_cutoff_fast(
         const Position& pos,
         Move move,
         int depth,
-        int ply
+        int ply,
+        int capture_see_value = 0,
+        Move prev_move = Move(0),
+        Move prev2_move = Move(0)
     ) noexcept {
         if (move_is_capture(move)) {
             bonus_capture_fast(pos, move, depth);
+            bonus_see_bias_fast(depth, capture_see_value);
             return;
         }
 
@@ -198,6 +416,9 @@ struct HistoryTables {
         }
 
         bonus_fast(pos, move, depth);
+        set_countermove_fast(pos, prev_move, move);
+        bonus_continuation_fast(pos, prev_move, move, depth);
+        bonus_continuation_fast(pos, prev2_move, move, std::max(1, depth / 2));
     }
 };
 
