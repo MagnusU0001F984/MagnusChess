@@ -34,20 +34,6 @@ constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
 
-#ifndef VALERAIN_SEE_TERM_PRESET
-#define VALERAIN_SEE_TERM_PRESET 1
-#endif
-
-#if VALERAIN_SEE_TERM_PRESET == 0
-constexpr SeeScalePreset MOVE_PICKER_SEE_TERM_PRESET = SeeScalePreset::Weak;
-#elif VALERAIN_SEE_TERM_PRESET == 1
-constexpr SeeScalePreset MOVE_PICKER_SEE_TERM_PRESET = SeeScalePreset::Medium;
-#elif VALERAIN_SEE_TERM_PRESET == 2
-constexpr SeeScalePreset MOVE_PICKER_SEE_TERM_PRESET = SeeScalePreset::Strong;
-#else
-#error "VALERAIN_SEE_TERM_PRESET must be 0 (Weak), 1 (Medium), or 2 (Strong)"
-#endif
-
 [[nodiscard]] inline int mvv_lva_capture_term(
     const Position& pos,
     Move move
@@ -255,17 +241,11 @@ bool MovePicker::move_in_quiets(Move move) const noexcept {
 
 int MovePicker::score_capture(Move move, int see_value) const noexcept {
     return mvv_lva_capture_term(pos_, move)
-        + history_.capture_value_fast(pos_, move)
-        + see_immediate_term(see_value, MOVE_PICKER_SEE_TERM_PRESET)
-        + history_.see_bias_value_fast(depth_, see_value);
+        + history_.capture_ordering_score_fast(pos_, move, depth_, see_value);
 }
 
 int MovePicker::score_quiet(Move move) const noexcept {
-    int score = history_.quiet_value_fast(pos_, move);
-    score += history_.countermove_bonus_fast(pos_, move, prev_move_);
-    score += history_.continuation_value_fast(pos_, move, prev_move_);
-    score += history_.continuation_value_fast(pos_, move, prev2_move_) / 2;
-    return score;
+    return history_.quiet_ordering_score_fast(pos_, move, prev_move_, prev2_move_);
 }
 
 MovePicker::ScoredEntry MovePicker::pick_best_entry(

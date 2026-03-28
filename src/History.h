@@ -74,6 +74,46 @@ namespace valerain::search {
 #define VALERAIN_COUNTERMOVE_BONUS 4096
 #endif
 
+#ifndef VALERAIN_QUIET_HISTORY_WEIGHT
+#define VALERAIN_QUIET_HISTORY_WEIGHT 1
+#endif
+
+#ifndef VALERAIN_COUNTERMOVE_WEIGHT_NUM
+#define VALERAIN_COUNTERMOVE_WEIGHT_NUM 1
+#endif
+
+#ifndef VALERAIN_COUNTERMOVE_WEIGHT_DEN
+#define VALERAIN_COUNTERMOVE_WEIGHT_DEN 1
+#endif
+
+#ifndef VALERAIN_CONT1_WEIGHT_NUM
+#define VALERAIN_CONT1_WEIGHT_NUM 1
+#endif
+
+#ifndef VALERAIN_CONT1_WEIGHT_DEN
+#define VALERAIN_CONT1_WEIGHT_DEN 1
+#endif
+
+#ifndef VALERAIN_CONT2_WEIGHT_NUM
+#define VALERAIN_CONT2_WEIGHT_NUM 1
+#endif
+
+#ifndef VALERAIN_CONT2_WEIGHT_DEN
+#define VALERAIN_CONT2_WEIGHT_DEN 4
+#endif
+
+#ifndef VALERAIN_CAPTURE_HISTORY_WEIGHT
+#define VALERAIN_CAPTURE_HISTORY_WEIGHT 1
+#endif
+
+#ifndef VALERAIN_CAPTURE_IMM_SEE_WEIGHT
+#define VALERAIN_CAPTURE_IMM_SEE_WEIGHT 1
+#endif
+
+#ifndef VALERAIN_CAPTURE_SEE_BIAS_WEIGHT
+#define VALERAIN_CAPTURE_SEE_BIAS_WEIGHT 1
+#endif
+
 enum class SeeClass : std::uint8_t {
     LossBig = 0,
     LossSmall,
@@ -98,6 +138,20 @@ enum class SeeScalePreset : std::uint8_t {
     Medium,
     Strong
 };
+
+#ifndef VALERAIN_SEE_TERM_PRESET
+#define VALERAIN_SEE_TERM_PRESET 1
+#endif
+
+#if VALERAIN_SEE_TERM_PRESET == 0
+constexpr SeeScalePreset HISTORY_ORDERING_SEE_TERM_PRESET = SeeScalePreset::Weak;
+#elif VALERAIN_SEE_TERM_PRESET == 1
+constexpr SeeScalePreset HISTORY_ORDERING_SEE_TERM_PRESET = SeeScalePreset::Medium;
+#elif VALERAIN_SEE_TERM_PRESET == 2
+constexpr SeeScalePreset HISTORY_ORDERING_SEE_TERM_PRESET = SeeScalePreset::Strong;
+#else
+#error "VALERAIN_SEE_TERM_PRESET must be 0 (Weak), 1 (Medium), or 2 (Strong)"
+#endif
 
 struct KillerTable {
     Move table[MAX_PLY][2]{};
@@ -204,6 +258,41 @@ struct HistoryTables {
             return 0;
 
         return continuation.value[side][prev_piece][to_sq(prev_move)][cur_piece][to_sq(move)];
+    }
+    [[nodiscard]] inline i32 quiet_ordering_score_fast(
+        const Position& pos,
+        Move move,
+        Move prev_move,
+        Move prev2_move
+    ) const noexcept {
+        if (move_is_capture(move))
+            return 0;
+
+        i32 score = 0;
+        score += VALERAIN_QUIET_HISTORY_WEIGHT * quiet_value_fast(pos, move);
+        score += (VALERAIN_COUNTERMOVE_WEIGHT_NUM * countermove_bonus_fast(pos, move, prev_move))
+            / VALERAIN_COUNTERMOVE_WEIGHT_DEN;
+        score += (VALERAIN_CONT1_WEIGHT_NUM * continuation_value_fast(pos, move, prev_move))
+            / VALERAIN_CONT1_WEIGHT_DEN;
+        score += (VALERAIN_CONT2_WEIGHT_NUM * continuation_value_fast(pos, move, prev2_move))
+            / VALERAIN_CONT2_WEIGHT_DEN;
+        return score;
+    }
+    [[nodiscard]] inline i32 capture_ordering_score_fast(
+        const Position& pos,
+        Move move,
+        int depth,
+        int see_value
+    ) const noexcept {
+        if (!move_is_capture(move))
+            return 0;
+
+        i32 score = 0;
+        score += VALERAIN_CAPTURE_HISTORY_WEIGHT * capture_value_fast(pos, move);
+        score += VALERAIN_CAPTURE_IMM_SEE_WEIGHT
+            * see_immediate_term(see_value, HISTORY_ORDERING_SEE_TERM_PRESET);
+        score += VALERAIN_CAPTURE_SEE_BIAS_WEIGHT * see_bias_value_fast(depth, see_value);
+        return score;
     }
 
     inline void bonus_fast(const Position& pos, Move move, int depth) noexcept {
