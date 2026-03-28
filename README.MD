@@ -113,7 +113,7 @@ make pgo-generate
 ```
 2. Run representative workloads to generate profile data:
 ```bash
-./bin/valerain_pgo search 10 64
+./bin/valerain_pgo search 20 64
 ```
 3. Rebuild with profile use:
 ```bash
