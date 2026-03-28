@@ -70,6 +70,8 @@ constexpr int QUIET_LMR_STRONG_ORDERING_SCORE = 2048;
 constexpr int QUIET_LMR_WEAK_ORDERING_SCORE = -512;
 constexpr int QUIET_LMR_STRONG_HISTORY_SCORE = 192;
 constexpr int QUIET_LMR_WEAK_HISTORY_SCORE = -192;
+constexpr int HASHFULL_SAMPLE_CLUSTERS = 256;
+constexpr int HASHFULL_REPORT_PERIOD = 4;
 
 #ifndef VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD
 #define VALERAIN_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD -60
@@ -1309,11 +1311,8 @@ struct Searcher {
                 capture_move &&
                 !move_is_promotion(move);
             int move_see_value = 0;
-            int move_see_bias_term = 0;
             if (capture_move)
                 move_see_value = picker.last_see_value();
-            if (capture_move)
-                move_see_bias_term = history_tables.see_bias_value_fast(search_depth, move_see_value);
             const int history_score = quiet_move
                 ? history_tables.quiet_value_fast(pos, move)
                 : 0;
@@ -1488,6 +1487,9 @@ struct Searcher {
                         ++cap_obs.cap_lmr_eligible;
 #endif
                     if (eligible) {
+                        const int move_see_bias_term = history_tables.see_bias_value_fast(
+                            search_depth, move_see_value
+                        );
                         const int reduction = capture_lmr_reduction(
                             search_depth, simple_capture_count, move_see_value, move_see_bias_term
                         );
@@ -1788,6 +1790,7 @@ SearchResult iterative_deepening(
     const auto search_start = Searcher::clock::now();
     searcher.start_time = search_start;
     u64 total_nodes = 0;
+    int cached_hashfull = 0;
 
     const int max_depth = std::max(1, limits.depth);
 
@@ -1860,13 +1863,18 @@ SearchResult iterative_deepening(
                 ? static_cast<u64>(static_cast<double>(total_nodes) / seconds)
                 : 0ULL;
             const u64 time_ms = static_cast<u64>(seconds * 1000.0);
+            if (depth == 1 ||
+                depth == max_depth ||
+                (depth % HASHFULL_REPORT_PERIOD) == 0) {
+                cached_hashfull = memory::tt_hashfull(mem.tt, HASHFULL_SAMPLE_CLUSTERS);
+            }
 
             *out << "info depth " << depth
                  << " seldepth " << current.seldepth << ' ';
             append_uci_score(*out, current.score);
             *out << " nodes " << total_nodes
                  << " nps " << nps
-                 << " hashfull " << memory::tt_hashfull(mem.tt)
+                 << " hashfull " << cached_hashfull
                  << " time " << time_ms
                  << " pv";
 

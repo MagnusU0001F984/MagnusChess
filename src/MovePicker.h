@@ -111,6 +111,8 @@ private:
     bool killer2_ready_ = false;
     Move killer1_move_ = Move(0);
     Move killer2_move_ = Move(0);
+    int killer1_score_ = 0;
+    int killer2_score_ = 0;
 
     int last_score_ = 0;
     bool last_was_capture_ = false;
@@ -122,7 +124,7 @@ private:
     void add_capture(Move move) noexcept;
     void add_quiet(Move move) noexcept;
     void choose_killers() noexcept;
-    [[nodiscard]] bool move_in_quiets(Move move) const noexcept;
+    [[nodiscard]] bool quiet_score_from_list(Move move, int& score) const noexcept;
 
     [[nodiscard]] int score_capture(Move move, int see_value) const noexcept;
     [[nodiscard]] int score_quiet(Move move) const noexcept;

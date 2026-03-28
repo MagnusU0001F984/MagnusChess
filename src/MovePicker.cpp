@@ -109,7 +109,7 @@ Move MovePicker::next() noexcept {
                 stage_ = MoveStage::KILLER_2;
                 if (killer1_ready_) {
                     killer1_ready_ = false;
-                    set_last(score_quiet(killer1_move_), false, false, 0);
+                    set_last(killer1_score_, false, false, 0);
                     return killer1_move_;
                 }
                 break;
@@ -118,7 +118,7 @@ Move MovePicker::next() noexcept {
                 stage_ = MoveStage::QUIETS;
                 if (killer2_ready_) {
                     killer2_ready_ = false;
-                    set_last(score_quiet(killer2_move_), false, false, 0);
+                    set_last(killer2_score_, false, false, 0);
                     return killer2_move_;
                 }
                 break;
@@ -213,29 +213,37 @@ void MovePicker::choose_killers() noexcept {
     killer2_ready_ = false;
     killer1_move_ = Move(0);
     killer2_move_ = Move(0);
+    killer1_score_ = 0;
+    killer2_score_ = 0;
 
+    int quiet_score = 0;
     if (!move_is_none(killer1_) &&
         killer1_ != tt_move_ &&
         !move_is_capture(killer1_) &&
-        move_in_quiets(killer1_)) {
+        quiet_score_from_list(killer1_, quiet_score)) {
         killer1_ready_ = true;
         killer1_move_ = killer1_;
+        killer1_score_ = quiet_score;
     }
 
     if (!move_is_none(killer2_) &&
         killer2_ != tt_move_ &&
         killer2_ != killer1_move_ &&
         !move_is_capture(killer2_) &&
-        move_in_quiets(killer2_)) {
+        quiet_score_from_list(killer2_, quiet_score)) {
         killer2_ready_ = true;
         killer2_move_ = killer2_;
+        killer2_score_ = quiet_score;
     }
 }
 
-bool MovePicker::move_in_quiets(Move move) const noexcept {
-    for (int i = 0; i < quiet_size_; ++i)
-        if (quiets_[i].move == move)
+bool MovePicker::quiet_score_from_list(Move move, int& score) const noexcept {
+    for (int i = 0; i < quiet_size_; ++i) {
+        if (quiets_[i].move == move) {
+            score = quiets_[i].score;
             return true;
+        }
+    }
     return false;
 }
 
