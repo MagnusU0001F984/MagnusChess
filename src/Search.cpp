@@ -110,74 +110,6 @@ constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
 
-enum class PVCheckStatus : std::uint8_t {
-    Ok = 0,
-    LengthOverflow,
-    NoneMove,
-    NotPseudoLegal,
-    Illegal
-};
-
-struct PVValidationResult {
-    int requested_length = 0;
-    int clamped_length = 0;
-    int legal_prefix = 0;
-    int invalid_index = -1;
-    Move invalid_move = Move(0);
-    PVCheckStatus status = PVCheckStatus::Ok;
-
-    [[nodiscard]] bool ok() const noexcept {
-        return status == PVCheckStatus::Ok;
-    }
-};
-
-[[nodiscard]] inline PVValidationResult validate_pv_line(
-    const Position& root,
-    const memory::Memory& mem,
-    const Move* pv,
-    int pv_length
-) noexcept {
-    PVValidationResult result{};
-    result.requested_length = pv_length;
-    result.clamped_length = std::clamp(pv_length, 0, MAX_PLY - 1);
-
-    Position pos = root;
-    for (int i = 0; i < result.clamped_length; ++i) {
-        const Move move = pv[i];
-        if (move_is_none(move)) {
-            result.invalid_index = i;
-            result.invalid_move = move;
-            result.status = PVCheckStatus::NoneMove;
-            return result;
-        }
-
-        if (!pseudo_legal(pos, mem, move)) {
-            result.invalid_index = i;
-            result.invalid_move = move;
-            result.status = PVCheckStatus::NotPseudoLegal;
-            return result;
-        }
-
-        GenInfo info{};
-        init_gen_info(info, pos, mem);
-        if (!legal_fast(pos, mem, info, move)) {
-            result.invalid_index = i;
-            result.invalid_move = move;
-            result.status = PVCheckStatus::Illegal;
-            return result;
-        }
-
-        StateInfo st{};
-        make_move(pos, move, mem.tables, st);
-        result.legal_prefix = i + 1;
-    }
-
-    if (result.clamped_length != result.requested_length)
-        result.status = PVCheckStatus::LengthOverflow;
-
-    return result;
-}
-
 [[nodiscard]] static inline int mvv_lva_capture_term(
     const Position& pos,
     Move move
@@ -976,14 +908,8 @@ struct Searcher {
 
     // PV lines are copied upward every time a child improves alpha.
     inline void update_pv(int ply, Move move) noexcept {
-        if (move_is_none(move)) {
-            pv_length[ply] = 0;
-            return;
-        }
-
         pv_table[ply][0] = move;
-        const int max_child_len = MAX_PLY - ply - 1;
-        const int child_len = std::clamp(pv_length[ply + 1], 0, max_child_len);
+        const int child_len = pv_length[ply + 1];
         if (child_len > 0) {
             std::memcpy(
                 &pv_table[ply][1],
@@ -1100,8 +1026,7 @@ struct Searcher {
             // Stand-pat: if the static position already fails high, no capture
             // search can make it worse for the side to move.
             if (static_eval >= beta) {
-                if (!stopped)
-                    save_tt(pos, 0, ply, static_eval, static_eval, tt_move, alpha0, beta, pv_node);
+                save_tt(pos, 0, ply, static_eval, static_eval, tt_move, alpha0, beta, pv_node);
                 return static_eval;
             }
             if (static_eval > alpha)
@@ -1116,8 +1041,7 @@ struct Searcher {
 
         if (list.size == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : alpha;
-            if (!stopped)
-                save_tt(pos, 0, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            save_tt(pos, 0, ply, score, static_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
@@ -1179,13 +1103,11 @@ struct Searcher {
 
         if (legal_count == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : alpha;
-            if (!stopped)
-                save_tt(pos, 0, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            save_tt(pos, 0, ply, score, static_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
-        if (!stopped)
-            save_tt(pos, 0, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
+        save_tt(pos, 0, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
 
@@ -1296,8 +1218,7 @@ struct Searcher {
             undo_null_move(pos, null_state);
 
             if (score >= beta) {
-                if (!stopped)
-                    save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
+                save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
                 return score;
             }
         }
@@ -1677,8 +1598,7 @@ struct Searcher {
 
         if (legal_count == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : 0;
-            if (!stopped)
-                save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
+            save_tt(pos, search_depth, ply, score, static_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
@@ -1716,8 +1636,7 @@ struct Searcher {
             );
         }
 
-        if (!stopped)
-            save_tt(pos, search_depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
+        save_tt(pos, search_depth, ply, alpha, static_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
 
@@ -1764,19 +1683,12 @@ struct Searcher {
         const int static_eval = probe.hit ? probe.data.eval : evaluate_position(root);
         const int alpha0 = alpha;
         const bool checked = in_check(root);
-        Move fallback_move = Move(0);
-        for (int i = 0; i < list.size; ++i) {
-            if (legal_fast(root, mem, info, list.moves[i])) {
-                fallback_move = list.moves[i];
-                break;
-            }
-        }
 
         ScoredMoveList scored;
         score_moves(root, list, scored, root_hint, 0, depth);
         int best_score = -VALUE_INF;
         int legal_count = 0;
-        result.best_move = fallback_move;
+        result.best_move = 0;
 
         for (int i = 0; i < scored.size; ++i) {
             if (hit_hard_limit())
@@ -1817,18 +1729,8 @@ struct Searcher {
         }
 
         if (legal_count == 0) {
-            if (fallback_move != 0) {
-                pv_table[0][0] = fallback_move;
-                pv_length[0] = 1;
-                result.score = static_eval;
-                result.best_move = fallback_move;
-                result.nodes = nodes;
-                result.seldepth = seldepth;
-                return result;
-            }
             result.score = checked ? -VALUE_MATE : 0;
             result.best_move = 0;
-            result.nodes = nodes;
             result.seldepth = seldepth;
             return result;
         }
@@ -1839,8 +1741,7 @@ struct Searcher {
         result.score = best_score;
         result.nodes = nodes;
         result.seldepth = seldepth;
-        if (!stopped)
-            save_tt(root, depth, 0, best_score, static_eval, result.best_move, alpha0, beta, true);
+        save_tt(root, depth, 0, best_score, static_eval, result.best_move, alpha0, beta, true);
         return result;
     }
 };
@@ -1948,12 +1849,6 @@ SearchResult iterative_deepening(
         const auto end = Searcher::clock::now();
         total_nodes += depth_nodes;
         const bool stopped_mid_depth = searcher.stopped && best.depth > 0;
-        const PVValidationResult pv_check = validate_pv_line(
-            keyed_root,
-            mem,
-            searcher.pv_table[0],
-            searcher.pv_length[0]
-        );
 
         if (!searcher.stopped || best.depth == 0) {
             best = current;
@@ -1983,7 +1878,7 @@ SearchResult iterative_deepening(
                  << " time " << time_ms
                  << " pv";
 
-            for (int i = 0; i < pv_check.legal_prefix; ++i)
+            for (int i = 0; i < searcher.pv_length[0]; ++i)
                 *out << ' ' << move_to_uci(searcher.pv_table[0][i]);
 
             *out << '\n';

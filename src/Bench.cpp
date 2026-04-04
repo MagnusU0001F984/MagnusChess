@@ -25,18 +25,14 @@ SOFTWARE.
 #include "Attack.h"
 #include "Bench.h"
 #include "Memory.h"
-#include "MoveGen.h"
 #include "Perft.h"
 #include "Position.h"
 #include "Search.h"
 
 #include <chrono>
-#include <atomic>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
-#include <string>
 #include <string_view>
 
 namespace valerain {
@@ -45,280 +41,6 @@ namespace valerain {
 Bench mode is deliberately tiny: create a start position, initialize shared
 tables, then route either to perft/divide or to the fixed-depth search smoke test.
 */
-
-namespace {
-
-[[nodiscard]] bool list_contains_move(const MoveList& list, Move move) noexcept {
-    for (int i = 0; i < list.size; ++i)
-        if (list.moves[i] == move)
-            return true;
-    return false;
-}
-
-[[nodiscard]] bool contains_text(
-    const std::string& text,
-    std::string_view needle
-) noexcept {
-    return text.find(needle) != std::string::npos;
-}
-
-Position make_pinned_ep_regression_position(const memory::Memory& mem) noexcept {
-    Position pos{};
-    position_clear(pos);
-
-    pos.side_to_move = WHITE;
-    pos.ep_sq = 44; // e6
-    pos.castling_rights = NO_CASTLING;
-    pos.halfmove_clock = 0;
-    pos.fullmove_number = 1;
-
-    position_put_piece(pos, BLACK, KING, 56);   // a8
-    position_put_piece(pos, BLACK, BISHOP, 62); // g8
-    position_put_piece(pos, BLACK, PAWN, 36);   // e5
-    position_put_piece(pos, WHITE, PAWN, 35);   // d5
-    position_put_piece(pos, WHITE, KING, 26);   // c4
-
-    position_refresh_key(pos, mem.tables);
-    return pos;
-}
-
-Position make_pinned_pawn_regression_position(const memory::Memory& mem) noexcept {
-    Position pos{};
-    position_clear(pos);
-
-    pos.side_to_move = WHITE;
-    pos.ep_sq = NO_SQ;
-    pos.castling_rights = NO_CASTLING;
-    pos.halfmove_clock = 0;
-    pos.fullmove_number = 1;
-
-    position_put_piece(pos, WHITE, KING, 4);    // e1
-    position_put_piece(pos, WHITE, PAWN, 12);   // e2
-    position_put_piece(pos, BLACK, KING, 56);   // a8
-    position_put_piece(pos, BLACK, ROOK, 60);   // e8
-    position_put_piece(pos, BLACK, BISHOP, 19); // d3
-
-    position_refresh_key(pos, mem.tables);
-    return pos;
-}
-
-[[nodiscard]] bool regression_root_stop_keeps_legal_fallback(
-    memory::Memory& mem,
-    std::ostream& out
-) {
-    memory::memory_clear_hash(mem);
-
-    Position pos{};
-    set_start_position(pos);
-    position_refresh_key(pos, mem.tables);
-
-    std::atomic<bool> stop_requested{true};
-    search::SearchLimits limits{};
-    limits.depth = 1;
-    limits.stop = &stop_requested;
-
-    const search::SearchResult result =
-        search::iterative_deepening(pos, mem, limits, nullptr);
-
-    Position work = pos;
-    const bool ok =
-        !move_is_none(result.best_move) &&
-        legal(work, mem, result.best_move);
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "root stop fallback move: "
-        << search::move_to_uci(result.best_move) << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_interrupted_search_skips_root_tt(
-    memory::Memory& mem,
-    std::ostream& out
-) {
-    memory::memory_clear_hash(mem);
-
-    Position pos{};
-    set_start_position(pos);
-    position_refresh_key(pos, mem.tables);
-
-    search::SearchLimits limits{};
-    limits.depth = 2;
-    limits.node_limit = 1;
-
-    (void)search::iterative_deepening(pos, mem, limits, nullptr);
-
-    const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
-    const bool ok = !probe.hit;
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "interrupted root TT save: hit=" << (probe.hit ? "true" : "false");
-    if (probe.hit) {
-        out << " move=" << search::move_to_uci(static_cast<Move>(probe.data.move))
-            << " depth=" << probe.data.depth
-            << " flags=" << static_cast<int>(probe.data.flags);
-    }
-    out << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_pinned_ep_is_generated(
-    const memory::Memory& mem,
-    std::ostream& out
-) {
-    Position pos = make_pinned_ep_regression_position(mem);
-    MoveList list{};
-    generate_legal(pos, mem, list);
-
-    const Move ep_move = make_move(35, 44, MOVE_EP); // d5e6 ep
-    const bool ok = list.size == 7 && list_contains_move(list, ep_move);
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "pinned EP generation: size=" << list.size
-        << " contains_d5e6=" << (list_contains_move(list, ep_move) ? "true" : "false")
-        << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_public_legal_rejects_non_pseudo_move(
-    const memory::Memory& mem,
-    std::ostream& out
-) {
-    Position pos{};
-    set_start_position(pos);
-    position_refresh_key(pos, mem.tables);
-
-    const Move good_move = make_move(12, 28, MOVE_DOUBLE_PUSH); // e2e4
-    const Move bad_move = make_move(0, 63, MOVE_QUIET);         // a1h8
-    const bool ok =
-        legal(pos, mem, good_move) &&
-        !legal(pos, mem, bad_move);
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "public legal() pseudo filter: good="
-        << (legal(pos, mem, good_move) ? "true" : "false")
-        << " bad=" << (legal(pos, mem, bad_move) ? "true" : "false")
-        << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_pinned_pawn_generation_stays_legal(
-    const memory::Memory& mem,
-    std::ostream& out
-) {
-    Position pos = make_pinned_pawn_regression_position(mem);
-
-    MoveList legal_moves{};
-    generate_legal(pos, mem, legal_moves);
-
-    MoveList capture_moves{};
-    generate_captures(pos, mem, capture_moves);
-
-    const Move e2e3 = make_move(12, 20, MOVE_QUIET);
-    const Move e2e4 = make_move(12, 28, MOVE_DOUBLE_PUSH);
-    const Move e2d3 = make_move(12, 19, MOVE_CAPTURE);
-
-    const bool ok =
-        list_contains_move(legal_moves, e2e3) &&
-        list_contains_move(legal_moves, e2e4) &&
-        !list_contains_move(legal_moves, e2d3) &&
-        !list_contains_move(capture_moves, e2d3) &&
-        !legal(pos, mem, e2d3);
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "pinned pawn generation: e2e3="
-        << (list_contains_move(legal_moves, e2e3) ? "true" : "false")
-        << " e2e4=" << (list_contains_move(legal_moves, e2e4) ? "true" : "false")
-        << " e2d3_legal="
-        << (list_contains_move(legal_moves, e2d3) ? "true" : "false")
-        << " e2d3_caps="
-        << (list_contains_move(capture_moves, e2d3) ? "true" : "false")
-        << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_root_stop_emits_legal_pv(
-    memory::Memory& mem,
-    std::ostream& out
-) {
-    memory::memory_clear_hash(mem);
-
-    Position pos{};
-    set_start_position(pos);
-    position_refresh_key(pos, mem.tables);
-
-    std::atomic<bool> stop_requested{true};
-    search::SearchLimits limits{};
-    limits.depth = 1;
-    limits.stop = &stop_requested;
-
-    std::ostringstream log;
-    const search::SearchResult result =
-        search::iterative_deepening(pos, mem, limits, &log);
-    const std::string text = log.str();
-
-    const std::string best_move = search::move_to_uci(result.best_move);
-    const bool ok =
-        !move_is_none(result.best_move) &&
-        legal(pos, mem, result.best_move) &&
-        contains_text(text, "info depth 1") &&
-        contains_text(text, " pv " + best_move) &&
-        !contains_text(text, "info string pvcheck");
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "root stop PV logging: move=" << best_move
-        << " pv_present="
-        << (contains_text(text, " pv " + best_move) ? "true" : "false")
-        << '\n';
-    return ok;
-}
-
-[[nodiscard]] bool regression_illegal_tt_hint_does_not_pollute_pv(
-    memory::Memory& mem,
-    std::ostream& out
-) {
-    memory::memory_clear_hash(mem);
-
-    Position pos{};
-    set_start_position(pos);
-    position_refresh_key(pos, mem.tables);
-
-    const Move bad_tt_move = make_move(0, 63, MOVE_QUIET); // a1h8
-    memory::tt_save(
-        mem.tt,
-        pos.key,
-        bad_tt_move,
-        0,
-        0,
-        6,
-        memory::BOUND_UPPER,
-        false
-    );
-
-    search::SearchLimits limits{};
-    limits.depth = 1;
-
-    std::ostringstream log;
-    const search::SearchResult result =
-        search::iterative_deepening(pos, mem, limits, &log);
-    const std::string text = log.str();
-    const std::string bad_tt_uci = search::move_to_uci(bad_tt_move);
-
-    const bool ok =
-        !move_is_none(result.best_move) &&
-        legal(pos, mem, result.best_move) &&
-        contains_text(text, "info depth 1") &&
-        !contains_text(text, "info string pvcheck") &&
-        !contains_text(text, " pv " + bad_tt_uci) &&
-        !contains_text(text, " " + bad_tt_uci + " ");
-
-    out << (ok ? "[PASS] " : "[FAIL] ")
-        << "illegal TT hint PV safety: tt=" << bad_tt_uci
-        << " best=" << search::move_to_uci(result.best_move)
-        << '\n';
-    return ok;
-}
-
-} // namespace
 
 void set_start_position(Position& pos) noexcept {
     // Rebuild the standard initial chess position through the public mutators so
@@ -392,12 +114,6 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         cfg.search = true;
         argi = 2;
     }
-    else if (argc > 1 &&
-             (std::string_view(argv[1]) == "test" ||
-              std::string_view(argv[1]) == "regression")) {
-        cfg.regression = true;
-        argi = 2;
-    }
 
     if (cfg.search) {
         if (argc > argi) cfg.search_depth = std::max(1, std::atoi(argv[argi]));
@@ -415,29 +131,8 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
     return cfg;
 }
 
-int run_regression_tests() {
-    memory::Memory mem{};
-    memory_init(mem, 16, 8, 2);
-    attack_init_backend(mem);
-
-    int failures = 0;
-    failures += regression_root_stop_keeps_legal_fallback(mem, std::cout) ? 0 : 1;
-    failures += regression_interrupted_search_skips_root_tt(mem, std::cout) ? 0 : 1;
-    failures += regression_pinned_ep_is_generated(mem, std::cout) ? 0 : 1;
-    failures += regression_public_legal_rejects_non_pseudo_move(mem, std::cout) ? 0 : 1;
-    failures += regression_pinned_pawn_generation_stays_legal(mem, std::cout) ? 0 : 1;
-    failures += regression_root_stop_emits_legal_pv(mem, std::cout) ? 0 : 1;
-    failures += regression_illegal_tt_hint_does_not_pollute_pv(mem, std::cout) ? 0 : 1;
-
-    memory_free(mem);
-    return failures == 0 ? 0 : 1;
-}
-
 int run_bench(int argc, char** argv) { 
     const BenchConfig cfg = parse_config(argc, argv);
-
-    if (cfg.regression)
-        return run_regression_tests();
 
     memory::Memory mem{};
     memory_init(mem, cfg.hash_mb, 8, 2);

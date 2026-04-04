@@ -39,9 +39,6 @@ namespace valerain {
 
 namespace {
 
-constexpr Bitboard FILE_A_BB = 0x0101010101010101ULL;
-constexpr Bitboard FILE_H_BB = 0x8080808080808080ULL;
-
 inline Color opposite(Color c) noexcept {
     return c == WHITE ? BLACK : WHITE;
 }
@@ -66,13 +63,6 @@ inline Bitboard ortho_sliders_bb(const Position& pos, Color c) noexcept {
     return pieces_bb(pos, c, ROOK) | pieces_bb(pos, c, QUEEN);
 }
 
-inline Bitboard pawn_attack_span(Color by, Bitboard pawns) noexcept {
-    if (by == WHITE)
-        return ((pawns << 7) & ~FILE_H_BB) | ((pawns << 9) & ~FILE_A_BB);
-
-    return ((pawns >> 7) & ~FILE_A_BB) | ((pawns >> 9) & ~FILE_H_BB);
-}
-
 inline Bitboard attacks_by_color_on_occ(
     const Position& pos,
     const memory::Memory& mem,
@@ -88,7 +78,11 @@ inline Bitboard attacks_by_color_on_occ(
     Bitboard queens  = pieces_bb(pos, by, QUEEN);
     Bitboard kings   = pieces_bb(pos, by, KING);
 
-    attacks |= pawn_attack_span(by, pawns);
+    while (pawns) {
+        const Square sq = lsb_sq(pawns);
+        pawns &= pawns - 1;
+        attacks |= pawn_attacks(mem, by, sq);
+    }
     while (knights) {
         const Square sq = lsb_sq(knights);
         knights &= knights - 1;
@@ -109,9 +103,11 @@ inline Bitboard attacks_by_color_on_occ(
         queens &= queens - 1;
         attacks |= queen_attacks(mem, sq, occupied);
     }
-
-    if (kings)
-        attacks |= king_attacks(mem, lsb_sq(kings));
+    while (kings) {
+        const Square sq = lsb_sq(kings);
+        kings &= kings - 1;
+        attacks |= king_attacks(mem, sq);
+    }
 
     return attacks;
 }
@@ -158,48 +154,8 @@ inline Bitboard pin_mask_for(
     const GenInfo& info,
     Square from
 ) noexcept {
-    const Bitboard from_bb = bb_of(from);
-    if ((info.pinned & from_bb) == 0ULL)
-        return ~0ULL;
-
-    // A pinned piece may move anywhere on the full king-pinner ray, including
-    // captures of the pinner beyond the pinned piece itself.
-    Bitboard pinners = info.pinners;
-    while (pinners) {
-        const Square pinner_sq = lsb_sq(pinners);
-        pinners &= pinners - 1;
-
-        if ((between_bb(mem, info.king_sq, pinner_sq) & from_bb) != 0ULL)
-            return line_bb(mem, info.king_sq, pinner_sq);
-    }
-
-    return line_bb(mem, info.king_sq, from);
-}
-
-inline bool is_pinned_piece(const GenInfo& info, Square from) noexcept {
-    return (info.pinned & bb_of(from)) != 0ULL;
-}
-
-inline Bitboard apply_pin_constraint(
-    const memory::Memory& mem,
-    const GenInfo& info,
-    Square from,
-    Bitboard mask
-) noexcept {
-    if (!is_pinned_piece(info, from))
-        return mask;
-
-    return mask & pin_mask_for(mem, info, from);
-}
-
-inline Bitboard pin_mask_or_all(
-    const memory::Memory& mem,
-    const GenInfo& info,
-    Square from
-) noexcept {
-    return is_pinned_piece(info, from)
-        ? pin_mask_for(mem, info, from)
-        : ~0ULL;
+    // A pinned piece may only move along the line between the king and the pinner.
+    return (info.pinned & bb_of(from)) ? line_bb(mem, info.king_sq, from) : ~0ULL;
 }
 
 inline Move* generate_knight_evasions(
@@ -215,12 +171,10 @@ inline Move* generate_knight_evasions(
         const Square from = lsb_sq(knights);
         knights &= knights - 1;
 
-        if (is_pinned_piece(info, from))
-            continue;
-
         Bitboard mask = knight_attacks(mem, from);
         mask &= ~info.us_occ;
         mask &= target;
+        mask &= pin_mask_for(mem, info, from);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -244,7 +198,7 @@ inline Move* generate_bishop_evasions(
         Bitboard mask = bishop_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
         mask &= target;
-        mask = apply_pin_constraint(mem, info, from, mask);
+        mask &= pin_mask_for(mem, info, from);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -268,7 +222,7 @@ inline Move* generate_rook_evasions(
         Bitboard mask = rook_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
         mask &= target;
-        mask = apply_pin_constraint(mem, info, from, mask);
+        mask &= pin_mask_for(mem, info, from);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -292,7 +246,7 @@ inline Move* generate_queen_evasions(
         Bitboard mask = queen_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
         mask &= target;
-        mask = apply_pin_constraint(mem, info, from, mask);
+        mask &= pin_mask_for(mem, info, from);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -452,9 +406,6 @@ inline Move* generate_knight_non_evasions(
         const Square from = lsb_sq(knights);
         knights &= knights - 1;
 
-        if (is_pinned_piece(info, from))
-            continue;
-
         Bitboard mask = knight_attacks(mem, from);
         mask &= ~info.us_occ;
 
@@ -478,7 +429,6 @@ inline Move* generate_bishop_non_evasions(
 
         Bitboard mask = bishop_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -500,7 +450,6 @@ inline Move* generate_rook_non_evasions(
 
         Bitboard mask = rook_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -522,7 +471,6 @@ inline Move* generate_queen_non_evasions(
 
         Bitboard mask = queen_attacks(mem, from, info.occupied);
         mask &= ~info.us_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -532,7 +480,6 @@ inline Move* generate_queen_non_evasions(
 
 inline Move* generate_white_pawn_non_evasions(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
@@ -544,12 +491,9 @@ inline Move* generate_white_pawn_non_evasions(
 
         const int r = rank_of(from);
         const int f = file_of(from);
-        const Bitboard pin_mask = pin_mask_or_all(mem, info, from);
 
         const Square one = from + 8;
-        if (one < SQ_NB &&
-            !(info.occupied & bb_of(one)) &&
-            (pin_mask & bb_of(one))) {
+        if (one < SQ_NB && !(info.occupied & bb_of(one))) {
             if (r == 6) {
                 out = append_promotion_moves(from, one, false, out);
             } else {
@@ -557,18 +501,15 @@ inline Move* generate_white_pawn_non_evasions(
 
                 if (r == 1) {
                     const Square two = from + 16;
-                    if (!(info.occupied & bb_of(two)) &&
-                        (pin_mask & bb_of(two))) {
+                    if (!(info.occupied & bb_of(two)))
                         *out++ = make_move(from, two, MOVE_DOUBLE_PUSH);
-                    }
                 }
             }
         }
 
         if (f > 0) {
             const Square to = from + 7;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 6) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -576,8 +517,7 @@ inline Move* generate_white_pawn_non_evasions(
 
         if (f < 7) {
             const Square to = from + 9;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 6) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -589,7 +529,6 @@ inline Move* generate_white_pawn_non_evasions(
 
 inline Move* generate_black_pawn_non_evasions(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
@@ -601,12 +540,9 @@ inline Move* generate_black_pawn_non_evasions(
 
         const int r = rank_of(from);
         const int f = file_of(from);
-        const Bitboard pin_mask = pin_mask_or_all(mem, info, from);
 
         const Square one = from - 8;
-        if (one >= 0 &&
-            !(info.occupied & bb_of(one)) &&
-            (pin_mask & bb_of(one))) {
+        if (one >= 0 && !(info.occupied & bb_of(one))) {
             if (r == 1) {
                 out = append_promotion_moves(from, one, false, out);
             } else {
@@ -614,18 +550,15 @@ inline Move* generate_black_pawn_non_evasions(
 
                 if (r == 6) {
                     const Square two = from - 16;
-                    if (!(info.occupied & bb_of(two)) &&
-                        (pin_mask & bb_of(two))) {
+                    if (!(info.occupied & bb_of(two)))
                         *out++ = make_move(from, two, MOVE_DOUBLE_PUSH);
-                    }
                 }
             }
         }
 
         if (f > 0) {
             const Square to = from - 9;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 1) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -633,8 +566,7 @@ inline Move* generate_black_pawn_non_evasions(
 
         if (f < 7) {
             const Square to = from - 7;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 1) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -646,13 +578,12 @@ inline Move* generate_black_pawn_non_evasions(
 
 inline Move* generate_pawn_non_evasions(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
     return info.us == WHITE
-        ? generate_white_pawn_non_evasions(pos, mem, info, out)
-        : generate_black_pawn_non_evasions(pos, mem, info, out);
+        ? generate_white_pawn_non_evasions(pos, info, out)
+        : generate_black_pawn_non_evasions(pos, info, out);
 }
 
 inline Move* generate_king_captures(
@@ -680,9 +611,6 @@ inline Move* generate_knight_captures(
         const Square from = lsb_sq(knights);
         knights &= knights - 1;
 
-        if (is_pinned_piece(info, from))
-            continue;
-
         Bitboard mask = knight_attacks(mem, from);
         mask &= info.them_occ;
 
@@ -706,7 +634,6 @@ inline Move* generate_bishop_captures(
 
         Bitboard mask = bishop_attacks(mem, from, info.occupied);
         mask &= info.them_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -728,7 +655,6 @@ inline Move* generate_rook_captures(
 
         Bitboard mask = rook_attacks(mem, from, info.occupied);
         mask &= info.them_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -750,7 +676,6 @@ inline Move* generate_queen_captures(
 
         Bitboard mask = queen_attacks(mem, from, info.occupied);
         mask &= info.them_occ;
-        mask = apply_pin_constraint(mem, info, from, mask);
 
         out = append_moves_from_mask(from, mask, info.them_occ, out);
     }
@@ -760,7 +685,6 @@ inline Move* generate_queen_captures(
 
 inline Move* generate_white_pawn_captures(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
@@ -772,12 +696,10 @@ inline Move* generate_white_pawn_captures(
 
         const int r = rank_of(from);
         const int f = file_of(from);
-        const Bitboard pin_mask = pin_mask_or_all(mem, info, from);
 
         if (f > 0) {
             const Square to = from + 7;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 6) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -785,8 +707,7 @@ inline Move* generate_white_pawn_captures(
 
         if (f < 7) {
             const Square to = from + 9;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 6) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -798,7 +719,6 @@ inline Move* generate_white_pawn_captures(
 
 inline Move* generate_black_pawn_captures(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
@@ -810,12 +730,10 @@ inline Move* generate_black_pawn_captures(
 
         const int r = rank_of(from);
         const int f = file_of(from);
-        const Bitboard pin_mask = pin_mask_or_all(mem, info, from);
 
         if (f > 0) {
             const Square to = from - 9;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 1) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -823,8 +741,7 @@ inline Move* generate_black_pawn_captures(
 
         if (f < 7) {
             const Square to = from - 7;
-            if ((info.them_occ & bb_of(to)) != 0ULL &&
-                (pin_mask & bb_of(to))) {
+            if ((info.them_occ & bb_of(to)) != 0ULL) {
                 if (r == 1) out = append_promotion_moves(from, to, true, out);
                 else        *out++ = make_move(from, to, MOVE_CAPTURE);
             }
@@ -836,13 +753,12 @@ inline Move* generate_black_pawn_captures(
 
 inline Move* generate_pawn_captures(
     const Position& pos,
-    const memory::Memory& mem,
     const GenInfo& info,
     Move* out
 ) noexcept {
     return info.us == WHITE
-        ? generate_white_pawn_captures(pos, mem, info, out)
-        : generate_black_pawn_captures(pos, mem, info, out);
+        ? generate_white_pawn_captures(pos, info, out)
+        : generate_black_pawn_captures(pos, info, out);
 }
 
 inline Move* generate_ep_non_evasions(
@@ -883,7 +799,7 @@ inline Move* generate_capture_non_evasions_with_info(
     out = generate_bishop_captures(pos, mem, info, out);
     out = generate_rook_captures(pos, mem, info, out);
     out = generate_queen_captures(pos, mem, info, out);
-    out = generate_pawn_captures(pos, mem, info, out);
+    out = generate_pawn_captures(pos, info, out);
     out = generate_ep_non_evasions(pos, mem, info, out);
     return out;
 }
@@ -975,42 +891,20 @@ inline Move* generate_castling_non_evasions(
     return out;
 }
 
-inline void compute_checkers_pinners_and_pinned(
+inline void compute_pinners_and_pinned(
     const Position& pos,
     const memory::Memory& mem,
     Color us,
-    Bitboard& checkers,
     Bitboard& pinners,
     Bitboard& pinned
 ) noexcept {
     const Color them = opposite(us);
     const Square ksq = pos.king_sq[us];
     const Bitboard own = pos.color_bb[us];
-    const Bitboard occupied = pos.occupied;
-    const Bitboard diag_sliders = diag_sliders_bb(pos, them);
-    const Bitboard ortho_sliders = ortho_sliders_bb(pos, them);
 
-    const Bitboard bishop_seen = bishop_attacks(mem, ksq, occupied);
-    const Bitboard rook_seen = rook_attacks(mem, ksq, occupied);
-    const Bitboard bishop_screened = bishop_seen & own;
-    const Bitboard rook_screened = rook_seen & own;
-
-    checkers = 0ULL;
-    checkers |= pawn_attacks(mem, us, ksq) & pieces_bb(pos, them, PAWN);
-    checkers |= knight_attacks(mem, ksq) & pieces_bb(pos, them, KNIGHT);
-    checkers |= king_attacks(mem, ksq) & pieces_bb(pos, them, KING);
-    checkers |= bishop_seen & diag_sliders;
-    checkers |= rook_seen & ortho_sliders;
-
-    Bitboard bishop_xray = bishop_seen;
-    if (bishop_screened)
-        bishop_xray ^= bishop_attacks(mem, ksq, occupied ^ bishop_screened);
-
-    Bitboard rook_xray = rook_seen;
-    if (rook_screened)
-        rook_xray ^= rook_attacks(mem, ksq, occupied ^ rook_screened);
-
-    pinners = (rook_xray & ortho_sliders) | (bishop_xray & diag_sliders);
+    pinners = 0ULL;
+    pinners |= rook_xray_attacks(mem, ksq, pos.occupied, own) & ortho_sliders_bb(pos, them);
+    pinners |= bishop_xray_attacks(mem, ksq, pos.occupied, own) & diag_sliders_bb(pos, them);
 
     pinned = 0ULL;
     Bitboard tmp = pinners;
@@ -1021,7 +915,7 @@ inline void compute_checkers_pinners_and_pinned(
     }
 }
 
-inline bool legal_after_pseudo_move(
+inline bool legal_slow(
     Position& pos,
     const memory::Memory& mem,
     Move m
@@ -1031,9 +925,6 @@ inline bool legal_after_pseudo_move(
 
     const Color us   = static_cast<Color>(pos.side_to_move);
     const Color them = (us == WHITE ? BLACK : WHITE);
-    const Piece moving = piece_on(pos, from_sq(m));
-    if (moving == PIECE_NONE || color_of(moving) != us)
-        return false;
 
     StateInfo st{};
     make_move(pos, m, mem.tables, st);
@@ -1063,16 +954,12 @@ inline bool legal_fast_impl(
         return true;
 
     if (move_is_ep(m))
-        return legal_after_pseudo_move(pos, mem, m);
+        return legal_slow(pos, mem, m);
 
     if ((info.pinned & bb_of(from)) == 0ULL)
         return true;
 
-    return (pin_mask_for(mem, info, from) & bb_of(to_sq(m))) != 0ULL;
-}
-
-inline bool can_emit_generated_moves_as_legal(const GenInfo& info) noexcept {
-    return !info.in_check && info.ep_sq == NO_SQ;
+    return legal_slow(pos, mem, m);
 }
 
 inline Move* generate_non_evasions_with_info(
@@ -1086,7 +973,7 @@ inline Move* generate_non_evasions_with_info(
     out = generate_bishop_non_evasions(pos, mem, info, out);
     out = generate_rook_non_evasions(pos, mem, info, out);
     out = generate_queen_non_evasions(pos, mem, info, out);
-    out = generate_pawn_non_evasions(pos, mem, info, out);
+    out = generate_pawn_non_evasions(pos, info, out);
     out = generate_ep_non_evasions(pos, mem, info, out);
     out = generate_castling_non_evasions(pos, mem, info, out);
     return out;
@@ -1165,11 +1052,10 @@ Bitboard checkers_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
-    Bitboard checkers = 0ULL;
-    Bitboard pinners = 0ULL;
-    Bitboard pinned = 0ULL;
-    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
-    return checkers;
+    // Squares attacking our king determine whether we are in check and how
+    // evasions must be constrained.
+    const Color them = opposite(us);
+    return attackers_to_color(pos, mem, pos.king_sq[us], them, pos.occupied);
 }
 
 Bitboard pinners_bb(
@@ -1177,10 +1063,9 @@ Bitboard pinners_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
-    Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
+    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
     return pinners;
 }
 
@@ -1189,10 +1074,9 @@ Bitboard pinned_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
-    Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
+    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
     return pinned;
 }
 
@@ -1222,14 +1106,8 @@ void init_gen_info(
     info.us_occ   = pos.color_bb[info.us];
     info.them_occ = pos.color_bb[info.them];
 
-    compute_checkers_pinners_and_pinned(
-        pos,
-        mem,
-        info.us,
-        info.checkers,
-        info.pinners,
-        info.pinned
-    );
+    info.checkers = checkers_bb(pos, mem, info.us);
+    compute_pinners_and_pinned(pos, mem, info.us, info.pinners, info.pinned);
     info.danger = danger_bb(pos, mem, info.them);
 
     info.in_check     = info.checkers != 0;
@@ -1281,10 +1159,7 @@ bool legal(
     const memory::Memory& mem,
     Move m
 ) noexcept {
-    if (!pseudo_legal(pos, mem, m))
-        return false;
-
-    return legal_after_pseudo_move(pos, mem, m);
+    return legal_slow(pos, mem, m);
 }
 
 bool legal(
@@ -1314,9 +1189,6 @@ Move* generate_captures(
     // candidates directly for qsearch.
     GenInfo info{};
     init_gen_info(info, pos, mem);
-
-    if (can_emit_generated_moves_as_legal(info))
-        return generate_capture_non_evasions_with_info(pos, mem, info, out);
 
     Move pseudo[MAX_MOVES];
     Move* mid = info.in_check
@@ -1349,18 +1221,6 @@ Move* generate_quiets(
 ) noexcept {
     GenInfo info{};
     init_gen_info(info, pos, mem);
-
-    if (can_emit_generated_moves_as_legal(info)) {
-        Move pseudo[MAX_MOVES];
-        Move* mid = generate_non_evasions_with_info(pos, mem, info, pseudo);
-
-        for (Move* it = pseudo; it != mid; ++it) {
-            if (!move_is_capture(*it))
-                *out++ = *it;
-        }
-
-        return out;
-    }
 
     Move pseudo[MAX_MOVES];
     Move* mid = generate_pseudo_legal_with_info(pos, mem, info, pseudo);
@@ -1453,9 +1313,6 @@ Move* generate_legal(
     // the king safe according to the fast legality checker.
     GenInfo info{};
     init_gen_info(info, pos, mem);
-
-    if (can_emit_generated_moves_as_legal(info))
-        return generate_non_evasions_with_info(pos, mem, info, out);
 
     Move pseudo[MAX_MOVES];
     Move* mid = generate_pseudo_legal_with_info(pos, mem, info, pseudo);
