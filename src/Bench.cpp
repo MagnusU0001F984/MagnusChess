@@ -35,6 +35,8 @@ SOFTWARE.
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <sstream>
+#include <string>
 #include <string_view>
 
 namespace valerain {
@@ -51,6 +53,13 @@ namespace {
         if (list.moves[i] == move)
             return true;
     return false;
+}
+
+[[nodiscard]] bool contains_text(
+    const std::string& text,
+    std::string_view needle
+) noexcept {
+    return text.find(needle) != std::string::npos;
 }
 
 Position make_pinned_ep_regression_position(const memory::Memory& mem) noexcept {
@@ -146,6 +155,110 @@ Position make_pinned_ep_regression_position(const memory::Memory& mem) noexcept 
     out << (ok ? "[PASS] " : "[FAIL] ")
         << "pinned EP generation: size=" << list.size
         << " contains_d5e6=" << (list_contains_move(list, ep_move) ? "true" : "false")
+        << '\n';
+    return ok;
+}
+
+[[nodiscard]] bool regression_public_legal_rejects_non_pseudo_move(
+    const memory::Memory& mem,
+    std::ostream& out
+) {
+    Position pos{};
+    set_start_position(pos);
+    position_refresh_key(pos, mem.tables);
+
+    const Move good_move = make_move(12, 28, MOVE_DOUBLE_PUSH); // e2e4
+    const Move bad_move = make_move(0, 63, MOVE_QUIET);         // a1h8
+    const bool ok =
+        legal(pos, mem, good_move) &&
+        !legal(pos, mem, bad_move);
+
+    out << (ok ? "[PASS] " : "[FAIL] ")
+        << "public legal() pseudo filter: good="
+        << (legal(pos, mem, good_move) ? "true" : "false")
+        << " bad=" << (legal(pos, mem, bad_move) ? "true" : "false")
+        << '\n';
+    return ok;
+}
+
+[[nodiscard]] bool regression_root_stop_emits_legal_pv(
+    memory::Memory& mem,
+    std::ostream& out
+) {
+    memory::memory_clear_hash(mem);
+
+    Position pos{};
+    set_start_position(pos);
+    position_refresh_key(pos, mem.tables);
+
+    std::atomic<bool> stop_requested{true};
+    search::SearchLimits limits{};
+    limits.depth = 1;
+    limits.stop = &stop_requested;
+
+    std::ostringstream log;
+    const search::SearchResult result =
+        search::iterative_deepening(pos, mem, limits, &log);
+    const std::string text = log.str();
+
+    const std::string best_move = search::move_to_uci(result.best_move);
+    const bool ok =
+        !move_is_none(result.best_move) &&
+        legal(pos, mem, result.best_move) &&
+        contains_text(text, "info depth 1") &&
+        contains_text(text, " pv " + best_move) &&
+        !contains_text(text, "info string pvcheck");
+
+    out << (ok ? "[PASS] " : "[FAIL] ")
+        << "root stop PV logging: move=" << best_move
+        << " pv_present="
+        << (contains_text(text, " pv " + best_move) ? "true" : "false")
+        << '\n';
+    return ok;
+}
+
+[[nodiscard]] bool regression_illegal_tt_hint_does_not_pollute_pv(
+    memory::Memory& mem,
+    std::ostream& out
+) {
+    memory::memory_clear_hash(mem);
+
+    Position pos{};
+    set_start_position(pos);
+    position_refresh_key(pos, mem.tables);
+
+    const Move bad_tt_move = make_move(0, 63, MOVE_QUIET); // a1h8
+    memory::tt_save(
+        mem.tt,
+        pos.key,
+        bad_tt_move,
+        0,
+        0,
+        6,
+        memory::BOUND_UPPER,
+        false
+    );
+
+    search::SearchLimits limits{};
+    limits.depth = 1;
+
+    std::ostringstream log;
+    const search::SearchResult result =
+        search::iterative_deepening(pos, mem, limits, &log);
+    const std::string text = log.str();
+    const std::string bad_tt_uci = search::move_to_uci(bad_tt_move);
+
+    const bool ok =
+        !move_is_none(result.best_move) &&
+        legal(pos, mem, result.best_move) &&
+        contains_text(text, "info depth 1") &&
+        !contains_text(text, "info string pvcheck") &&
+        !contains_text(text, " pv " + bad_tt_uci) &&
+        !contains_text(text, " " + bad_tt_uci + " ");
+
+    out << (ok ? "[PASS] " : "[FAIL] ")
+        << "illegal TT hint PV safety: tt=" << bad_tt_uci
+        << " best=" << search::move_to_uci(result.best_move)
         << '\n';
     return ok;
 }
@@ -256,6 +369,9 @@ int run_regression_tests() {
     failures += regression_root_stop_keeps_legal_fallback(mem, std::cout) ? 0 : 1;
     failures += regression_interrupted_search_skips_root_tt(mem, std::cout) ? 0 : 1;
     failures += regression_pinned_ep_is_generated(mem, std::cout) ? 0 : 1;
+    failures += regression_public_legal_rejects_non_pseudo_move(mem, std::cout) ? 0 : 1;
+    failures += regression_root_stop_emits_legal_pv(mem, std::cout) ? 0 : 1;
+    failures += regression_illegal_tt_hint_does_not_pollute_pv(mem, std::cout) ? 0 : 1;
 
     memory_free(mem);
     return failures == 0 ? 0 : 1;

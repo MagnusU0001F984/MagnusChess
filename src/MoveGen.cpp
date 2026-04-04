@@ -39,6 +39,9 @@ namespace valerain {
 
 namespace {
 
+constexpr Bitboard FILE_A_BB = 0x0101010101010101ULL;
+constexpr Bitboard FILE_H_BB = 0x8080808080808080ULL;
+
 inline Color opposite(Color c) noexcept {
     return c == WHITE ? BLACK : WHITE;
 }
@@ -63,6 +66,13 @@ inline Bitboard ortho_sliders_bb(const Position& pos, Color c) noexcept {
     return pieces_bb(pos, c, ROOK) | pieces_bb(pos, c, QUEEN);
 }
 
+inline Bitboard pawn_attack_span(Color by, Bitboard pawns) noexcept {
+    if (by == WHITE)
+        return ((pawns << 7) & ~FILE_H_BB) | ((pawns << 9) & ~FILE_A_BB);
+
+    return ((pawns >> 7) & ~FILE_A_BB) | ((pawns >> 9) & ~FILE_H_BB);
+}
+
 inline Bitboard attacks_by_color_on_occ(
     const Position& pos,
     const memory::Memory& mem,
@@ -78,11 +88,7 @@ inline Bitboard attacks_by_color_on_occ(
     Bitboard queens  = pieces_bb(pos, by, QUEEN);
     Bitboard kings   = pieces_bb(pos, by, KING);
 
-    while (pawns) {
-        const Square sq = lsb_sq(pawns);
-        pawns &= pawns - 1;
-        attacks |= pawn_attacks(mem, by, sq);
-    }
+    attacks |= pawn_attack_span(by, pawns);
     while (knights) {
         const Square sq = lsb_sq(knights);
         knights &= knights - 1;
@@ -103,11 +109,9 @@ inline Bitboard attacks_by_color_on_occ(
         queens &= queens - 1;
         attacks |= queen_attacks(mem, sq, occupied);
     }
-    while (kings) {
-        const Square sq = lsb_sq(kings);
-        kings &= kings - 1;
-        attacks |= king_attacks(mem, sq);
-    }
+
+    if (kings)
+        attacks |= king_attacks(mem, lsb_sq(kings));
 
     return attacks;
 }
@@ -905,20 +909,42 @@ inline Move* generate_castling_non_evasions(
     return out;
 }
 
-inline void compute_pinners_and_pinned(
+inline void compute_checkers_pinners_and_pinned(
     const Position& pos,
     const memory::Memory& mem,
     Color us,
+    Bitboard& checkers,
     Bitboard& pinners,
     Bitboard& pinned
 ) noexcept {
     const Color them = opposite(us);
     const Square ksq = pos.king_sq[us];
     const Bitboard own = pos.color_bb[us];
+    const Bitboard occupied = pos.occupied;
+    const Bitboard diag_sliders = diag_sliders_bb(pos, them);
+    const Bitboard ortho_sliders = ortho_sliders_bb(pos, them);
 
-    pinners = 0ULL;
-    pinners |= rook_xray_attacks(mem, ksq, pos.occupied, own) & ortho_sliders_bb(pos, them);
-    pinners |= bishop_xray_attacks(mem, ksq, pos.occupied, own) & diag_sliders_bb(pos, them);
+    const Bitboard bishop_seen = bishop_attacks(mem, ksq, occupied);
+    const Bitboard rook_seen = rook_attacks(mem, ksq, occupied);
+    const Bitboard bishop_screened = bishop_seen & own;
+    const Bitboard rook_screened = rook_seen & own;
+
+    checkers = 0ULL;
+    checkers |= pawn_attacks(mem, us, ksq) & pieces_bb(pos, them, PAWN);
+    checkers |= knight_attacks(mem, ksq) & pieces_bb(pos, them, KNIGHT);
+    checkers |= king_attacks(mem, ksq) & pieces_bb(pos, them, KING);
+    checkers |= bishop_seen & diag_sliders;
+    checkers |= rook_seen & ortho_sliders;
+
+    Bitboard bishop_xray = bishop_seen;
+    if (bishop_screened)
+        bishop_xray ^= bishop_attacks(mem, ksq, occupied ^ bishop_screened);
+
+    Bitboard rook_xray = rook_seen;
+    if (rook_screened)
+        rook_xray ^= rook_attacks(mem, ksq, occupied ^ rook_screened);
+
+    pinners = (rook_xray & ortho_sliders) | (bishop_xray & diag_sliders);
 
     pinned = 0ULL;
     Bitboard tmp = pinners;
@@ -929,7 +955,7 @@ inline void compute_pinners_and_pinned(
     }
 }
 
-inline bool legal_slow(
+inline bool legal_after_pseudo_move(
     Position& pos,
     const memory::Memory& mem,
     Move m
@@ -939,6 +965,9 @@ inline bool legal_slow(
 
     const Color us   = static_cast<Color>(pos.side_to_move);
     const Color them = (us == WHITE ? BLACK : WHITE);
+    const Piece moving = piece_on(pos, from_sq(m));
+    if (moving == PIECE_NONE || color_of(moving) != us)
+        return false;
 
     StateInfo st{};
     make_move(pos, m, mem.tables, st);
@@ -968,12 +997,12 @@ inline bool legal_fast_impl(
         return true;
 
     if (move_is_ep(m))
-        return legal_slow(pos, mem, m);
+        return legal_after_pseudo_move(pos, mem, m);
 
     if ((info.pinned & bb_of(from)) == 0ULL)
         return true;
 
-    return legal_slow(pos, mem, m);
+    return (pin_mask_for(mem, info, from) & bb_of(to_sq(m))) != 0ULL;
 }
 
 inline Move* generate_non_evasions_with_info(
@@ -1066,10 +1095,11 @@ Bitboard checkers_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
-    // Squares attacking our king determine whether we are in check and how
-    // evasions must be constrained.
-    const Color them = opposite(us);
-    return attackers_to_color(pos, mem, pos.king_sq[us], them, pos.occupied);
+    Bitboard checkers = 0ULL;
+    Bitboard pinners = 0ULL;
+    Bitboard pinned = 0ULL;
+    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
+    return checkers;
 }
 
 Bitboard pinners_bb(
@@ -1077,9 +1107,10 @@ Bitboard pinners_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
+    Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
+    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
     return pinners;
 }
 
@@ -1088,9 +1119,10 @@ Bitboard pinned_bb(
     const memory::Memory& mem,
     Color us
 ) noexcept {
+    Bitboard checkers = 0ULL;
     Bitboard pinners = 0ULL;
     Bitboard pinned = 0ULL;
-    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
+    compute_checkers_pinners_and_pinned(pos, mem, us, checkers, pinners, pinned);
     return pinned;
 }
 
@@ -1120,8 +1152,14 @@ void init_gen_info(
     info.us_occ   = pos.color_bb[info.us];
     info.them_occ = pos.color_bb[info.them];
 
-    info.checkers = checkers_bb(pos, mem, info.us);
-    compute_pinners_and_pinned(pos, mem, info.us, info.pinners, info.pinned);
+    compute_checkers_pinners_and_pinned(
+        pos,
+        mem,
+        info.us,
+        info.checkers,
+        info.pinners,
+        info.pinned
+    );
     info.danger = danger_bb(pos, mem, info.them);
 
     info.in_check     = info.checkers != 0;
@@ -1173,7 +1211,10 @@ bool legal(
     const memory::Memory& mem,
     Move m
 ) noexcept {
-    return legal_slow(pos, mem, m);
+    if (!pseudo_legal(pos, mem, m))
+        return false;
+
+    return legal_after_pseudo_move(pos, mem, m);
 }
 
 bool legal(

@@ -110,6 +110,74 @@ constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
 
+enum class PVCheckStatus : std::uint8_t {
+    Ok = 0,
+    LengthOverflow,
+    NoneMove,
+    NotPseudoLegal,
+    Illegal
+};
+
+struct PVValidationResult {
+    int requested_length = 0;
+    int clamped_length = 0;
+    int legal_prefix = 0;
+    int invalid_index = -1;
+    Move invalid_move = Move(0);
+    PVCheckStatus status = PVCheckStatus::Ok;
+
+    [[nodiscard]] bool ok() const noexcept {
+        return status == PVCheckStatus::Ok;
+    }
+};
+
+[[nodiscard]] inline PVValidationResult validate_pv_line(
+    const Position& root,
+    const memory::Memory& mem,
+    const Move* pv,
+    int pv_length
+) noexcept {
+    PVValidationResult result{};
+    result.requested_length = pv_length;
+    result.clamped_length = std::clamp(pv_length, 0, MAX_PLY - 1);
+
+    Position pos = root;
+    for (int i = 0; i < result.clamped_length; ++i) {
+        const Move move = pv[i];
+        if (move_is_none(move)) {
+            result.invalid_index = i;
+            result.invalid_move = move;
+            result.status = PVCheckStatus::NoneMove;
+            return result;
+        }
+
+        if (!pseudo_legal(pos, mem, move)) {
+            result.invalid_index = i;
+            result.invalid_move = move;
+            result.status = PVCheckStatus::NotPseudoLegal;
+            return result;
+        }
+
+        GenInfo info{};
+        init_gen_info(info, pos, mem);
+        if (!legal_fast(pos, mem, info, move)) {
+            result.invalid_index = i;
+            result.invalid_move = move;
+            result.status = PVCheckStatus::Illegal;
+            return result;
+        }
+
+        StateInfo st{};
+        make_move(pos, move, mem.tables, st);
+        result.legal_prefix = i + 1;
+    }
+
+    if (result.clamped_length != result.requested_length)
+        result.status = PVCheckStatus::LengthOverflow;
+
+    return result;
+}
+
 [[nodiscard]] static inline int mvv_lva_capture_term(
     const Position& pos,
     Move move
@@ -908,8 +976,14 @@ struct Searcher {
 
     // PV lines are copied upward every time a child improves alpha.
     inline void update_pv(int ply, Move move) noexcept {
+        if (move_is_none(move)) {
+            pv_length[ply] = 0;
+            return;
+        }
+
         pv_table[ply][0] = move;
-        const int child_len = pv_length[ply + 1];
+        const int max_child_len = MAX_PLY - ply - 1;
+        const int child_len = std::clamp(pv_length[ply + 1], 0, max_child_len);
         if (child_len > 0) {
             std::memcpy(
                 &pv_table[ply][1],
@@ -1744,6 +1818,8 @@ struct Searcher {
 
         if (legal_count == 0) {
             if (fallback_move != 0) {
+                pv_table[0][0] = fallback_move;
+                pv_length[0] = 1;
                 result.score = static_eval;
                 result.best_move = fallback_move;
                 result.nodes = nodes;
@@ -1872,6 +1948,12 @@ SearchResult iterative_deepening(
         const auto end = Searcher::clock::now();
         total_nodes += depth_nodes;
         const bool stopped_mid_depth = searcher.stopped && best.depth > 0;
+        const PVValidationResult pv_check = validate_pv_line(
+            keyed_root,
+            mem,
+            searcher.pv_table[0],
+            searcher.pv_length[0]
+        );
 
         if (!searcher.stopped || best.depth == 0) {
             best = current;
@@ -1901,7 +1983,7 @@ SearchResult iterative_deepening(
                  << " time " << time_ms
                  << " pv";
 
-            for (int i = 0; i < searcher.pv_length[0]; ++i)
+            for (int i = 0; i < pv_check.legal_prefix; ++i)
                 *out << ' ' << move_to_uci(searcher.pv_table[0][i]);
 
             *out << '\n';
