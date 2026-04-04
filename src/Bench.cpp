@@ -82,6 +82,26 @@ Position make_pinned_ep_regression_position(const memory::Memory& mem) noexcept 
     return pos;
 }
 
+Position make_pinned_pawn_regression_position(const memory::Memory& mem) noexcept {
+    Position pos{};
+    position_clear(pos);
+
+    pos.side_to_move = WHITE;
+    pos.ep_sq = NO_SQ;
+    pos.castling_rights = NO_CASTLING;
+    pos.halfmove_clock = 0;
+    pos.fullmove_number = 1;
+
+    position_put_piece(pos, WHITE, KING, 4);    // e1
+    position_put_piece(pos, WHITE, PAWN, 12);   // e2
+    position_put_piece(pos, BLACK, KING, 56);   // a8
+    position_put_piece(pos, BLACK, ROOK, 60);   // e8
+    position_put_piece(pos, BLACK, BISHOP, 19); // d3
+
+    position_refresh_key(pos, mem.tables);
+    return pos;
+}
+
 [[nodiscard]] bool regression_root_stop_keeps_legal_fallback(
     memory::Memory& mem,
     std::ostream& out
@@ -177,6 +197,41 @@ Position make_pinned_ep_regression_position(const memory::Memory& mem) noexcept 
         << "public legal() pseudo filter: good="
         << (legal(pos, mem, good_move) ? "true" : "false")
         << " bad=" << (legal(pos, mem, bad_move) ? "true" : "false")
+        << '\n';
+    return ok;
+}
+
+[[nodiscard]] bool regression_pinned_pawn_generation_stays_legal(
+    const memory::Memory& mem,
+    std::ostream& out
+) {
+    Position pos = make_pinned_pawn_regression_position(mem);
+
+    MoveList legal_moves{};
+    generate_legal(pos, mem, legal_moves);
+
+    MoveList capture_moves{};
+    generate_captures(pos, mem, capture_moves);
+
+    const Move e2e3 = make_move(12, 20, MOVE_QUIET);
+    const Move e2e4 = make_move(12, 28, MOVE_DOUBLE_PUSH);
+    const Move e2d3 = make_move(12, 19, MOVE_CAPTURE);
+
+    const bool ok =
+        list_contains_move(legal_moves, e2e3) &&
+        list_contains_move(legal_moves, e2e4) &&
+        !list_contains_move(legal_moves, e2d3) &&
+        !list_contains_move(capture_moves, e2d3) &&
+        !legal(pos, mem, e2d3);
+
+    out << (ok ? "[PASS] " : "[FAIL] ")
+        << "pinned pawn generation: e2e3="
+        << (list_contains_move(legal_moves, e2e3) ? "true" : "false")
+        << " e2e4=" << (list_contains_move(legal_moves, e2e4) ? "true" : "false")
+        << " e2d3_legal="
+        << (list_contains_move(legal_moves, e2d3) ? "true" : "false")
+        << " e2d3_caps="
+        << (list_contains_move(capture_moves, e2d3) ? "true" : "false")
         << '\n';
     return ok;
 }
@@ -370,6 +425,7 @@ int run_regression_tests() {
     failures += regression_interrupted_search_skips_root_tt(mem, std::cout) ? 0 : 1;
     failures += regression_pinned_ep_is_generated(mem, std::cout) ? 0 : 1;
     failures += regression_public_legal_rejects_non_pseudo_move(mem, std::cout) ? 0 : 1;
+    failures += regression_pinned_pawn_generation_stays_legal(mem, std::cout) ? 0 : 1;
     failures += regression_root_stop_emits_legal_pv(mem, std::cout) ? 0 : 1;
     failures += regression_illegal_tt_hint_does_not_pollute_pv(mem, std::cout) ? 0 : 1;
 
