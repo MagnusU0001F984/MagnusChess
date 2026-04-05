@@ -178,8 +178,6 @@ void MovePicker::build_lists() noexcept {
         else
             add_quiet(move);
     }
-
-    choose_killers();
 }
 
 void MovePicker::add_capture(Move move) noexcept {
@@ -200,51 +198,28 @@ void MovePicker::add_capture(Move move) noexcept {
 }
 
 void MovePicker::add_quiet(Move move) noexcept {
+    const int score = score_quiet(move);
+
+    if (move == killer1_) {
+        killer1_ready_ = true;
+        killer1_move_ = move;
+        killer1_score_ = score;
+        return;
+    }
+
+    if (move == killer2_ && move != killer1_move_) {
+        killer2_ready_ = true;
+        killer2_move_ = move;
+        killer2_score_ = score;
+        return;
+    }
+
     quiets_[quiet_size_] = ScoredEntry{
         move,
-        score_quiet(move),
+        score,
         0
     };
     ++quiet_size_;
-}
-
-void MovePicker::choose_killers() noexcept {
-    killer1_ready_ = false;
-    killer2_ready_ = false;
-    killer1_move_ = Move(0);
-    killer2_move_ = Move(0);
-    killer1_score_ = 0;
-    killer2_score_ = 0;
-
-    int quiet_score = 0;
-    if (!move_is_none(killer1_) &&
-        killer1_ != tt_move_ &&
-        !move_is_capture(killer1_) &&
-        quiet_score_from_list(killer1_, quiet_score)) {
-        killer1_ready_ = true;
-        killer1_move_ = killer1_;
-        killer1_score_ = quiet_score;
-    }
-
-    if (!move_is_none(killer2_) &&
-        killer2_ != tt_move_ &&
-        killer2_ != killer1_move_ &&
-        !move_is_capture(killer2_) &&
-        quiet_score_from_list(killer2_, quiet_score)) {
-        killer2_ready_ = true;
-        killer2_move_ = killer2_;
-        killer2_score_ = quiet_score;
-    }
-}
-
-bool MovePicker::quiet_score_from_list(Move move, int& score) const noexcept {
-    for (int i = 0; i < quiet_size_; ++i) {
-        if (quiets_[i].move == move) {
-            score = quiets_[i].score;
-            return true;
-        }
-    }
-    return false;
 }
 
 int MovePicker::score_capture(Move move, int see_value) const noexcept {

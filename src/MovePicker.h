@@ -123,8 +123,6 @@ private:
     void build_lists() noexcept;
     void add_capture(Move move) noexcept;
     void add_quiet(Move move) noexcept;
-    void choose_killers() noexcept;
-    [[nodiscard]] bool quiet_score_from_list(Move move, int& score) const noexcept;
 
     [[nodiscard]] int score_capture(Move move, int see_value) const noexcept;
     [[nodiscard]] int score_quiet(Move move) const noexcept;
