@@ -67,14 +67,13 @@ MovePicker::MovePicker(
     , killer2_(history.killer_fast(ply, 1))
     , prev_move_(prev_move)
     , prev2_move_(prev2_move)
-    , depth_(depth) {
-    build_lists();
-}
+    , depth_(depth) {}
 
 Move MovePicker::next() noexcept {
     while (true) {
         switch (stage_) {
             case MoveStage::TT_MOVE:
+                prepare_tt_move();
                 stage_ = MoveStage::GEN_CAPTURES;
                 if (tt_ready_) {
                     tt_ready_ = false;
@@ -89,6 +88,7 @@ Move MovePicker::next() noexcept {
                 break;
 
             case MoveStage::GEN_CAPTURES:
+                build_capture_stage();
                 stage_ = MoveStage::GOOD_CAPTURES;
                 break;
 
@@ -102,6 +102,7 @@ Move MovePicker::next() noexcept {
                 break;
 
             case MoveStage::GEN_QUIETS:
+                build_quiet_stage();
                 stage_ = MoveStage::KILLER_1;
                 break;
 
@@ -149,34 +150,69 @@ Move MovePicker::next() noexcept {
     }
 }
 
-void MovePicker::build_lists() noexcept {
+void MovePicker::prepare_tt_move() noexcept {
+    if (tt_prepared_)
+        return;
+
+    tt_prepared_ = true;
+    if (move_is_none(tt_move_))
+        return;
+
+    if (!pseudo_legal_fast(pos_, mem_, info_, tt_move_))
+        return;
+
+    if (!legal(pos_, mem_, tt_move_))
+        return;
+
+    tt_legal_ = true;
+    tt_ready_ = true;
+    if (move_is_capture(tt_move_)) {
+        tt_see_value_ = search::see_value_fast(pos_, mem_, tt_move_);
+        tt_bad_capture_ = tt_see_value_ < 0;
+        tt_score_ = score_capture(tt_move_, tt_see_value_);
+        return;
+    }
+
+    tt_see_value_ = 0;
+    tt_bad_capture_ = false;
+    tt_score_ = score_quiet(tt_move_);
+}
+
+void MovePicker::build_capture_stage() noexcept {
+    if (captures_built_)
+        return;
+
+    captures_built_ = true;
     MoveList list;
-    Move* end = generate_pseudo_legal(pos_, mem_, info_, list.moves);
+    Move* end = generate_pseudo_captures_only(pos_, mem_, info_, list.moves);
     list.size = static_cast<int>(end - list.moves);
 
     for (int i = 0; i < list.size; ++i) {
         const Move move = list.moves[i];
+        if (tt_legal_ && move == tt_move_)
+            continue;
         if (!legal_fast(pos_, mem_, info_, move))
             continue;
+        add_capture(move);
+    }
+}
 
-        if (move == tt_move_) {
-            tt_ready_ = true;
-            if (move_is_capture(move)) {
-                tt_see_value_ = search::see_value_fast(pos_, mem_, move);
-                tt_bad_capture_ = tt_see_value_ < 0;
-                tt_score_ = score_capture(move, tt_see_value_);
-            } else {
-                tt_see_value_ = 0;
-                tt_bad_capture_ = false;
-                tt_score_ = score_quiet(move);
-            }
+void MovePicker::build_quiet_stage() noexcept {
+    if (quiets_built_)
+        return;
+
+    quiets_built_ = true;
+    MoveList list;
+    Move* end = generate_pseudo_quiets(pos_, mem_, info_, list.moves);
+    list.size = static_cast<int>(end - list.moves);
+
+    for (int i = 0; i < list.size; ++i) {
+        const Move move = list.moves[i];
+        if (tt_legal_ && move == tt_move_)
             continue;
-        }
-
-        if (move_is_capture(move))
-            add_capture(move);
-        else
-            add_quiet(move);
+        if (!legal_fast(pos_, mem_, info_, move))
+            continue;
+        add_quiet(move);
     }
 }
 

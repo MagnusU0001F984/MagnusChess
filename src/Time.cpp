@@ -78,53 +78,61 @@ bool TimeManager::build_limits(
         const int move_number = std::max(1, pos.fullmove_number);
         const bool sudden_death = params.movestogo == 0 && increment == 0;
 
+        const bool opening_very_early = move_number <= 10;
+        const bool opening_early = move_number <= 20;
+
         int phase_scale = 100;
-        if (move_number <= 10)      phase_scale = sudden_death ? 50 : 60;
-        else if (move_number <= 20) phase_scale = sudden_death ? 65 : 75;
-        else if (move_number <= 35) phase_scale = sudden_death ? 80 : 90;
+        if (move_number <= 10)      phase_scale = sudden_death ? 35 : 45;
+        else if (move_number <= 20) phase_scale = sudden_death ? 50 : 60;
+        else if (move_number <= 35) phase_scale = sudden_death ? 75 : 85;
         else if (move_number <= 50) phase_scale = sudden_death ? 100 : 105;
         else                        phase_scale = sudden_death ? 115 : 120;
 
         const HistoryStats stats = collect_stats(side);
         if (stats.samples > 0) {
-            // Recent usage tells whether we are repeatedly starving or over-spending.
-            if (stats.avg_usage_pct >= 120)      phase_scale += 16;
-            else if (stats.avg_usage_pct >= 105) phase_scale += 10;
-            else if (stats.avg_usage_pct <= 70)  phase_scale -= 10;
-            else if (stats.avg_usage_pct <= 85)  phase_scale -= 5;
+            // 开局只保留“是否经常超预算”的轻量修正，
+            // 不让 score swing / best move flip 把开局时间抬回去。
+            if (stats.avg_usage_pct >= 120)      phase_scale += opening_very_early ? 6 : 12;
+            else if (stats.avg_usage_pct >= 105) phase_scale += opening_very_early ? 4 : 8;
+            else if (stats.avg_usage_pct <= 70)  phase_scale -= opening_very_early ? 8 : 10;
+            else if (stats.avg_usage_pct <= 85)  phase_scale -= opening_very_early ? 4 : 5;
 
-            // Volatile evaluations usually benefit from more thinking time.
-            if (stats.avg_score_swing_cp >= 140)      phase_scale += 12;
-            else if (stats.avg_score_swing_cp >= 90)  phase_scale += 7;
-            else if (stats.avg_score_swing_cp <= 30)  phase_scale -= 3;
+            if (!opening_early) {
+                if (stats.avg_score_swing_cp >= 140)      phase_scale += 12;
+                else if (stats.avg_score_swing_cp >= 90)  phase_scale += 7;
+                else if (stats.avg_score_swing_cp <= 30)  phase_scale -= 3;
 
-            // If root best moves keep flipping between iterations, spend a bit more.
-            if (stats.best_move_flip_pct >= 70)      phase_scale += 8;
-            else if (stats.best_move_flip_pct <= 30) phase_scale -= 2;
+                if (stats.best_move_flip_pct >= 70)      phase_scale += 8;
+                else if (stats.best_move_flip_pct <= 30) phase_scale -= 2;
+            }
         }
-        phase_scale = clamp_int(phase_scale, 45, 150);
+
+        phase_scale = clamp_int(phase_scale, 35, 150);
 
         const int mtg =
             params.movestogo > 0 ? params.movestogo :
             sudden_death
-                ? (move_number <= 10 ? 36 :
-                   move_number <= 20 ? 30 :
+                ? (move_number <= 10 ? 40 :
+                   move_number <= 20 ? 32 :
                    move_number <= 35 ? 24 : 18)
-                : 24;
+                : (move_number <= 10 ? 30 :
+                   move_number <= 20 ? 26 : 24);
 
         int reserve_div =
             sudden_death
-                ? (move_number <= 10 ? 8 :
-                   move_number <= 20 ? 10 :
+                ? (move_number <= 10 ? 6 :
+                   move_number <= 20 ? 8 :
                    move_number <= 35 ? 12 : 16)
-                : (phase_scale <= 75 ? 12 :
-                   phase_scale <= 90 ? 16 : 24);
+                : (opening_very_early ? 10 :
+                   opening_early      ? 12 :
+                   phase_scale <= 75  ? 12 :
+                   phase_scale <= 90  ? 16 : 24);
 
         if (stats.samples > 0) {
             if (stats.avg_usage_pct >= 110)
-                reserve_div = std::max(4, reserve_div - 2);
+                reserve_div = std::max(4, reserve_div - (opening_early ? 1 : 2));
             else if (stats.avg_usage_pct <= 70)
-                reserve_div += 2;
+                reserve_div += opening_early ? 1 : 2;
         }
 
         const int reserve_cap =
@@ -136,12 +144,18 @@ bool TimeManager::build_limits(
         const int usable = std::max(1, remaining - reserve);
 
         const int base = usable / std::max(1, mtg);
-        const int inc_share = (increment * (phase_scale + 20)) / 200;
+
+        int inc_share = 0;
+        if (increment > 0) {
+            if (opening_very_early)      inc_share = increment / 4;
+            else if (opening_early)      inc_share = (increment * 3) / 10;
+            else                         inc_share = (increment * (phase_scale + 20)) / 200;
+        }
 
         int soft = (base * phase_scale) / 100 + inc_share;
         soft += usable / std::max(sudden_death ? 160 : 96, mtg * (sudden_death ? 12 : 8));
 
-        const int soft_cap =
+        int soft_cap =
             sudden_death
                 ? (phase_scale <= 65 ? usable / 6 :
                    phase_scale <= 80 ? usable / 5 :
@@ -149,6 +163,13 @@ bool TimeManager::build_limits(
                 : (phase_scale <= 75 ? usable / 4 :
                    phase_scale <= 90 ? usable / 3 :
                    (usable * 2) / 5);
+
+        // 开局更硬的上限，避免后续补偿项把预算再次抬高
+        if (opening_very_early)
+            soft_cap = std::min(soft_cap, sudden_death ? usable / 10 : usable / 8);
+        else if (opening_early)
+            soft_cap = std::min(soft_cap, sudden_death ? usable / 8 : usable / 6);
+
         soft = std::max(1, std::min(soft, soft_cap));
 
         int hard = std::min(
@@ -159,7 +180,14 @@ bool TimeManager::build_limits(
             )
         );
 
-        if (stats.samples > 0 &&
+        // 开局 hard 不允许膨胀太离谱
+        if (opening_very_early)
+            hard = std::min(hard, std::max(soft, soft * 2));
+        else if (opening_early)
+            hard = std::min(hard, std::max(soft, (soft * 5) / 2));
+
+        if (!opening_early &&
+            stats.samples > 0 &&
             stats.avg_score_swing_cp >= 120 &&
             stats.avg_usage_pct >= 95) {
             hard = std::max(hard, std::min(usable, soft * 3));

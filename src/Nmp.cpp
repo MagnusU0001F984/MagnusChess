@@ -1,0 +1,102 @@
+/*
+MIT License
+
+Copyright (c) 2026 Mazhaoze
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+#include "Nmp.h"
+
+#include <algorithm>
+
+namespace valerain::search {
+
+namespace {
+
+constexpr int NMP_STATIC_BASE = 350;
+constexpr int NMP_STATIC_DEPTH_SLOPE = 18;
+constexpr int NMP_EVAL_BUCKET = 128;
+constexpr int NMP_MIN_REDUCTION = 2;
+constexpr int NMP_VERIFICATION_MIN_DEPTH = 16;
+constexpr int NMP_VERIFICATION_MIN_SPAN = 2;
+
+} // namespace
+
+bool nmp_disabled_for_ply(int ply, int nmp_min_ply) noexcept {
+    return nmp_min_ply != 0 && ply < nmp_min_ply;
+}
+
+NmpDecision decide_null_move(const NmpNodeContext& node) noexcept {
+    NmpDecision decision{};
+    decision.eval_gate = node.beta - NMP_STATIC_DEPTH_SLOPE * node.depth + NMP_STATIC_BASE;
+    decision.eval_margin = node.static_eval - node.beta;
+
+    if (!node.allow_null ||
+        node.pv_node ||
+        node.checked ||
+        node.exclusion_search ||
+        node.depth < 3 ||
+        !node.material_ok ||
+        nmp_disabled_for_ply(node.ply, node.nmp_min_ply) ||
+        node.static_eval < decision.eval_gate) {
+        return decision;
+    }
+
+    if (node.tt_hit &&
+        node.tt_bound == memory::BOUND_UPPER &&
+        node.tt_score < node.beta) {
+        return decision;
+    }
+
+    int reduction = NMP_MIN_REDUCTION + node.depth / 4;
+    reduction += std::clamp(decision.eval_margin / NMP_EVAL_BUCKET, 0, 2);
+    if (node.cut_node)
+        ++reduction;
+    if (!node.improving)
+        ++reduction;
+    if (!node.tt_move_present)
+        ++reduction;
+    if (node.tt_hit &&
+        node.tt_bound == memory::BOUND_LOWER &&
+        node.tt_score >= node.beta) {
+        --reduction;
+    }
+
+    reduction = std::clamp(
+        reduction,
+        NMP_MIN_REDUCTION,
+        std::max(NMP_MIN_REDUCTION, node.depth - 2)
+    );
+
+    decision.eligible = true;
+    decision.reduction = reduction;
+    decision.null_depth = std::max(0, node.depth - 1 - reduction);
+    decision.requires_verification =
+        node.depth >= NMP_VERIFICATION_MIN_DEPTH &&
+        node.nmp_min_ply == 0;
+    decision.verify_depth = decision.null_depth;
+    decision.verify_min_ply = node.ply + std::max(
+        NMP_VERIFICATION_MIN_SPAN,
+        (3 * std::max(1, decision.null_depth)) / 4
+    );
+    return decision;
+}
+
+} // namespace valerain::search

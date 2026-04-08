@@ -47,8 +47,8 @@ enum class MoveStage : std::uint8_t {
 /*
 MovePicker emits legal moves in staged order:
 TT move -> good captures -> killers -> quiets -> bad captures.
-The picker pre-builds legal candidates once per node and keeps stage logic in
-one place so the search loop can stay focused on pruning and reductions.
+The picker lazily builds each stage on first use so early cutoffs do not pay
+for later generation and scoring work.
 */
 class MovePicker {
 public:
@@ -103,9 +103,14 @@ private:
     int quiet_idx_ = 0;
 
     bool tt_ready_ = false;
+    bool tt_prepared_ = false;
+    bool tt_legal_ = false;
     int tt_score_ = 0;
     int tt_see_value_ = 0;
     bool tt_bad_capture_ = false;
+
+    bool captures_built_ = false;
+    bool quiets_built_ = false;
 
     bool killer1_ready_ = false;
     bool killer2_ready_ = false;
@@ -120,7 +125,9 @@ private:
     int last_see_value_ = 0;
 
 private:
-    void build_lists() noexcept;
+    void prepare_tt_move() noexcept;
+    void build_capture_stage() noexcept;
+    void build_quiet_stage() noexcept;
     void add_capture(Move move) noexcept;
     void add_quiet(Move move) noexcept;
 

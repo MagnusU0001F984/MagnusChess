@@ -11,9 +11,11 @@ SRC := \
 	Bench.cpp \
 	Evaluation.cpp \
 	History.cpp \
+	Lmr.cpp \
 	Main.cpp \
 	MovePicker.cpp \
 	MoveGen.cpp \
+	Nmp.cpp \
 	Nnue.cpp \
 	Perft.cpp \
 	Position.cpp \

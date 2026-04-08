@@ -26,6 +26,7 @@ SOFTWARE.
 
 #include <cstddef>
 #include <cstdint>
+#include <iosfwd>
 
 #include "Memory.h"
 #include "Perft.h"
@@ -35,7 +36,7 @@ namespace valerain {
 
 /*
 Bench mode is the command-line utility layer used for quick perft checks and
-simple fixed-depth search smoke tests outside of UCI.
+fixed-depth search/bench benchmarks outside of UCI.
 */
 
 struct BenchConfig {
@@ -64,6 +65,20 @@ void set_start_position(Position& pos) noexcept;
     const memory::Memory& mem,
     int depth,
     std::size_t threads
+);
+
+[[nodiscard]] bool run_search_bench(
+    memory::Memory& mem,
+    int depth,
+    bool use_nnue,
+    std::ostream& out
+);
+
+[[nodiscard]] bool run_timed_search_bench(
+    memory::Memory& mem,
+    int movetime_ms,
+    bool use_nnue,
+    std::ostream& out
 );
 
 [[nodiscard]] BenchConfig parse_config(int argc, char** argv) noexcept;

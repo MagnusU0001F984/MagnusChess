@@ -249,6 +249,13 @@ bool pseudo_legal(
     Move m
 ) noexcept;
 
+bool pseudo_legal_fast(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move m
+) noexcept;
+
 bool legal(
     Position& pos,
     const memory::Memory& mem,
@@ -265,6 +272,12 @@ bool legal_fast(
     Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
+    Move m
+) noexcept;
+
+bool move_gives_check(
+    const Position& pos,
+    const memory::Memory& mem,
     Move m
 ) noexcept;
 
@@ -324,6 +337,20 @@ Move* generate_pseudo_captures(
 Move* generate_pseudo_captures(
     const Position& pos,
     const memory::Memory& mem,
+    Move* out
+) noexcept;
+
+Move* generate_pseudo_captures_only(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move* out
+) noexcept;
+
+Move* generate_pseudo_quiets(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
     Move* out
 ) noexcept;
 

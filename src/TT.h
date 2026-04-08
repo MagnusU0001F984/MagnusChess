@@ -134,6 +134,6 @@ void tt_save(
     bool pv
 ) noexcept;
 
-[[nodiscard]] int tt_hashfull(const TT& tt, int sample_clusters = 1000) noexcept;
+[[nodiscard]] int tt_hashfull(const TT& tt, int max_age = 0) noexcept;
 
 } // namespace valerain::memory

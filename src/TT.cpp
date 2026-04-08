@@ -123,6 +123,15 @@ namespace {
     return best_lane;
 }
 
+[[nodiscard]] inline int tt_relative_age(u8 current_age, u8 entry_age) noexcept {
+    if (entry_age == 0)
+        return 256;
+
+    return current_age >= entry_age
+        ? static_cast<int>(current_age - entry_age)
+        : static_cast<int>((255 - entry_age) + current_age);
+}
+
 } // namespace
 
 TTData tt_cluster_load(const TTCluster& c, int lane) noexcept {
@@ -290,25 +299,29 @@ void tt_save(
     tt_cluster_store(*pr.slot.cluster, pr.slot.lane, nw);
 }
 
-int tt_hashfull(const TT& tt, int sample_clusters) noexcept {
+int tt_hashfull(const TT& tt, int max_age) noexcept {
     if (!tt.clusters || tt.cluster_count == 0) return 0;
 
+    constexpr int STOCKFISH_SAMPLE_CLUSTERS = 1000;
     const int n = static_cast<int>(std::min<std::size_t>(
-        tt.cluster_count, static_cast<std::size_t>(sample_clusters)
+        tt.cluster_count,
+        static_cast<std::size_t>(STOCKFISH_SAMPLE_CLUSTERS)
     ));
 
+    if (n == 0)
+        return 0;
+
     int used = 0;
-    int total = 0;
 
     for (int i = 0; i < n; ++i) {
         const TTCluster& c = tt.clusters[i];
         for (int lane = 0; lane < 4; ++lane) {
-            ++total;
-            used += (c.age[lane] == tt.generation);
+            used += c.age[lane] != 0
+                && tt_relative_age(tt.generation, c.age[lane]) <= max_age;
         }
     }
 
-    return total ? (used * 1000) / total : 0;
+    return (used * 1000) / (n * 4);
 }
 
 } // namespace valerain::memory

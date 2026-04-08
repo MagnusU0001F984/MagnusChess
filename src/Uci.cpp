@@ -24,13 +24,11 @@ SOFTWARE.
 
 #include "Uci.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <charconv>
 #include <cctype>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -57,6 +55,7 @@ namespace valerain {
 namespace {
 
 constexpr int DEFAULT_UCI_DEPTH = 8;
+constexpr int DEFAULT_BENCH_MOVETIME_MS = 1000;
 
 [[nodiscard]] constexpr const char* go_usage_hint() noexcept {
     return "go <depth/movetime/nodes>";
@@ -72,6 +71,10 @@ constexpr int DEFAULT_UCI_DEPTH = 8;
 
 [[nodiscard]] constexpr const char* divide_usage_hint() noexcept {
     return "divide <depth> <threads> [live]";
+}
+
+[[nodiscard]] constexpr const char* bench_usage_hint() noexcept {
+    return "bench";
 }
 
 [[nodiscard]] std::string default_eval_file() {
@@ -707,6 +710,23 @@ int run_uci() {
             } else {
                 std::cout << "info string nnue unavailable\n";
             }
+        }
+        else if (line.rfind("bench", 0) == 0) {
+            if (line != "bench") {
+                std::cout << "info string usage: " << bench_usage_hint() << '\n';
+                continue;
+            }
+
+            if (use_nnue && !nnue::loaded() && !ensure_nnue_loaded(eval_file, &std::cout))
+                std::cout << "info string nnue unavailable, bench will use hce\n";
+
+            if (!run_timed_search_bench(
+                    mem,
+                    DEFAULT_BENCH_MOVETIME_MS,
+                    use_nnue,
+                    std::cout
+                ))
+                std::cout << "info string bench failed\n";
         }
         else if (line.rfind("position", 0) == 0) {
             if (!set_position_from_command(pos, mem, std::string_view(line).substr(9)))
