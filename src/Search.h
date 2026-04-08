@@ -42,7 +42,7 @@ with a small set of pragmatic pruning heuristics.
 */
 
 constexpr int MAX_PLY = 128;
-constexpr int MAX_GAME_HISTORY = 512;
+constexpr int MAX_GAME_HISTORY = 128;
 
 struct SearchLimits {
     // Depth, node, and time limits supplied by bench mode or UCI.

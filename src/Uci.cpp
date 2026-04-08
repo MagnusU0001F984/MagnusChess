@@ -587,35 +587,6 @@ void handle_setoption(
     return time_manager.build_limits(pos, params, limits);
 }
 
-[[nodiscard]] bool parse_perft_command(
-    std::string_view command,
-    int& depth,
-    std::size_t& threads
-) noexcept {
-    std::istringstream iss{std::string(command)};
-    std::string token;
-    std::string value;
-
-    depth = -1;
-    threads = 0;
-
-    iss >> token; // perft
-
-    if (!(iss >> value) || !parse_int(value, depth) || depth < 0)
-        return false;
-
-    int parsed_threads = 0;
-    if (!(iss >> value) || !parse_int(value, parsed_threads) || parsed_threads <= 0)
-        return false;
-
-    threads = static_cast<std::size_t>(parsed_threads);
-
-    if (iss >> value)
-        return false;
-
-    return true;
-}
-
 [[nodiscard]] bool parse_divide_command(
     std::string_view command,
     int& depth,

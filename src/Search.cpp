@@ -183,10 +183,10 @@ struct Searcher {
     };
 
     struct StaticEvalInfo {
+        CorrectionKeys keys{};
         int raw = VALUE_NONE;
         int corrected = 0;
         int stand_pat = 0;
-        bool from_tt = false;
     };
 
     using clock = std::chrono::steady_clock;
@@ -834,39 +834,16 @@ struct Searcher {
 
         u64 material = 0;
         int shift = 0;
+        constexpr PieceType material_piece_types[] = {
+            PAWN, KNIGHT, BISHOP, ROOK, QUEEN
+        };
         for (int color = WHITE; color <= BLACK; ++color) {
-            material |= static_cast<u64>(packed_piece_count(
-                pos,
-                static_cast<Color>(color),
-                PAWN
-            )) << shift;
-            shift += 4;
-            material |= static_cast<u64>(packed_piece_count(
-                pos,
-                static_cast<Color>(color),
-                KNIGHT
-            )) << shift;
-            shift += 4;
-            material |= static_cast<u64>(packed_piece_count(
-                pos,
-                static_cast<Color>(color),
-                BISHOP
-            )) << shift;
-            shift += 4;
-            material |= static_cast<u64>(packed_piece_count(
-                pos,
-                static_cast<Color>(color),
-                ROOK
-            )) << shift;
-            shift += 4;
-            material |= static_cast<u64>(packed_piece_count(
-                pos,
-                static_cast<Color>(color),
-                QUEEN
-            )) << shift;
-            shift += 4;
+            const Color piece_color = static_cast<Color>(color);
+            for (PieceType piece_type : material_piece_types) {
+                material |= static_cast<u64>(packed_piece_count(pos, piece_color, piece_type)) << shift;
+                shift += 4;
+            }
         }
-        material |= static_cast<u64>(pos.eval_phase & 0x3F) << shift;
         keys.material = material;
         return keys;
     }
@@ -893,9 +870,10 @@ struct Searcher {
         ));
     }
 
-    [[nodiscard]] inline int correction_value(const Position& pos) const noexcept {
-        const Color side = static_cast<Color>(pos.side_to_move);
-        const CorrectionKeys keys = correction_keys(pos);
+    [[nodiscard]] inline int correction_value(
+        Color side,
+        const CorrectionKeys& keys
+    ) const noexcept {
         const int stored =
             CORRECTION_POSITION_WEIGHT
                 * correction_slot_value(position_correction_history[side], keys.position)
@@ -911,7 +889,8 @@ struct Searcher {
     }
 
     inline void update_correction_history(
-        const Position& pos,
+        Color side,
+        const CorrectionKeys& keys,
         int raw_eval,
         int score,
         int depth
@@ -919,8 +898,6 @@ struct Searcher {
         if (raw_eval == VALUE_NONE || is_mate_window(score))
             return;
 
-        const Color side = static_cast<Color>(pos.side_to_move);
-        const CorrectionKeys keys = correction_keys(pos);
         const int delta = std::clamp(
             score - raw_eval,
             -CORRECTION_HISTORY_CLAMP,
@@ -989,7 +966,7 @@ struct Searcher {
         return false;
     }
 
-    [[nodiscard]] inline int repetition_score(int eval_hint = VALUE_NONE) const noexcept {
+    [[nodiscard]] inline int repetition_score(int eval_hint) const noexcept {
         if (eval_hint == VALUE_NONE)
             return 0;
         return eval_hint > 0 ? REPETITION_AVOID_SCORE : 0;
@@ -1116,9 +1093,14 @@ struct Searcher {
         bool qsearch_node
     ) const noexcept {
         StaticEvalInfo info{};
-        info.from_tt = tt_eval_available(probe);
-        info.raw = info.from_tt ? probe.data.eval : evaluate_position(pos);
-        info.corrected = std::clamp(info.raw + correction_value(pos), -VALUE_INF, VALUE_INF);
+        info.keys = correction_keys(pos);
+        const Color side = static_cast<Color>(pos.side_to_move);
+        info.raw = tt_eval_available(probe) ? probe.data.eval : evaluate_position(pos);
+        info.corrected = std::clamp(
+            info.raw + correction_value(side, info.keys),
+            -VALUE_INF,
+            VALUE_INF
+        );
         info.stand_pat = info.corrected;
 
         if (!qsearch_node || checked || !probe.hit)
@@ -2134,7 +2116,7 @@ struct Searcher {
             alpha > alpha0 &&
             alpha < beta &&
             !is_mate_window(alpha)) {
-            update_correction_history(pos, raw_eval, alpha, search_depth);
+            update_correction_history(side, eval_info.keys, raw_eval, alpha, search_depth);
         }
 
         if (!exclusion_search)
@@ -2245,7 +2227,13 @@ struct Searcher {
             !is_mate_window(best_score) &&
             best_score > alpha0 &&
             best_score < beta) {
-            update_correction_history(root, raw_eval, best_score, depth);
+            update_correction_history(
+                static_cast<Color>(root.side_to_move),
+                eval_info.keys,
+                raw_eval,
+                best_score,
+                depth
+            );
         }
 
         result.score = best_score;
