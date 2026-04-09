@@ -57,7 +57,7 @@ constexpr int LMR_SHALLOWER_RESEARCH_MARGIN = 8;
 [[nodiscard]] static inline int base_quiet_reduction_fp(int depth, int move_index) noexcept {
     const int d = lmr_table_value(depth);
     const int m = lmr_table_value(move_index + 1);
-    return d * m + FP_ONE_PLY / 4;
+    return d * m + FP_ONE_PLY / 2;
 }
 
 [[nodiscard]] static inline int base_capture_reduction_fp(int depth, int reduction_index) noexcept {
@@ -122,7 +122,7 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
         !node.pv_node &&
         !node.checked &&
         node.depth >= 3 &&
-        move.move_index >= 3;
+        move.move_index >= 2;
     const bool capture_candidate =
         move.simple_capture &&
         !node.pv_node &&
@@ -145,15 +145,15 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
     decision.base_reduction_fp = fp;
 
     if (node.improving)
-        fp -= FP_ONE_PLY / 4;
+        fp -= FP_ONE_PLY / 8;
     else
-        fp += FP_ONE_PLY / 8;
+        fp += FP_ONE_PLY / 4;
 
     if (!node.tt_move_present)
-        fp += FP_ONE_PLY / 3;
+        fp += FP_ONE_PLY / 2;
 
     if (node.cut_node)
-        fp += FP_ONE_PLY / 3;
+        fp += FP_ONE_PLY / 2;
     if (node.all_node)
         fp += fp / (node.depth + 1);
 
@@ -179,7 +179,7 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
 
     const int min_reduction = 0;
     const int max_reduction = move.quiet
-        ? std::min(node.depth - 1, 4)
+        ? std::min(node.depth - 1, 5)
         : std::min(node.depth - 1, 3);
     decision.final_reduction_fp = std::clamp(
         fp,

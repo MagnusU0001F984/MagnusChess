@@ -24,6 +24,9 @@ SOFTWARE.
 
 #include "MovePicker.h"
 
+#include <algorithm>
+#include <limits>
+
 #include "See.h"
 
 namespace valerain::search {
@@ -33,6 +36,7 @@ namespace {
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
     100, 320, 330, 500, 900, 0
 };
+constexpr int MAX_TOP_HISTORY_QUIETS = 8;
 
 [[nodiscard]] inline int mvv_lva_capture_term(
     const Position& pos,
@@ -56,7 +60,8 @@ MovePicker::MovePicker(
     int ply,
     Move prev_move,
     Move prev2_move,
-    int depth
+    int depth,
+    QuietControl quiet_control
 ) noexcept
     : pos_(pos)
     , mem_(mem)
@@ -67,7 +72,8 @@ MovePicker::MovePicker(
     , killer2_(history.killer_fast(ply, 1))
     , prev_move_(prev_move)
     , prev2_move_(prev2_move)
-    , depth_(depth) {}
+    , depth_(depth)
+    , quiet_control_(quiet_control) {}
 
 Move MovePicker::next() noexcept {
     while (true) {
@@ -129,7 +135,14 @@ Move MovePicker::next() noexcept {
                     const ScoredEntry e = pick_best_entry(quiets_, quiet_size_, quiet_idx_);
                     if (e.move == killer1_move_ || e.move == killer2_move_)
                         continue;
-                    set_last(e.score, false, false, 0);
+                    set_last(
+                        e.score,
+                        false,
+                        false,
+                        0,
+                        e.quiet_in_skip_band,
+                        e.quiet_suppressed
+                    );
                     return e.move;
                 }
                 stage_ = MoveStage::BAD_CAPTURES;
@@ -206,13 +219,111 @@ void MovePicker::build_quiet_stage() noexcept {
     Move* end = generate_pseudo_quiets(pos_, mem_, info_, list.moves);
     list.size = static_cast<int>(end - list.moves);
 
+    if (!quiet_control_.skip_quiets) {
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            if (tt_legal_ && move == tt_move_)
+                continue;
+            if (!legal_fast(pos_, mem_, info_, move))
+                continue;
+            add_quiet(move, history_.quiet_value_fast(pos_, move), false, false);
+        }
+        return;
+    }
+
+    struct QuietCandidate {
+        Move move = 0;
+        int history_score = 0;
+        bool countermove = false;
+        bool top_history = false;
+    };
+
+    QuietCandidate candidates[MAX_MOVES]{};
+    int candidate_count = 0;
+
+    const Move countermove = history_.countermove_fast(pos_, prev_move_);
+    const int keep_top_history =
+        std::clamp(quiet_control_.keep_top_history, 0, MAX_TOP_HISTORY_QUIETS);
+    int top_indices[MAX_TOP_HISTORY_QUIETS]{};
+    int top_scores[MAX_TOP_HISTORY_QUIETS]{};
+    for (int i = 0; i < MAX_TOP_HISTORY_QUIETS; ++i) {
+        top_indices[i] = -1;
+        top_scores[i] = std::numeric_limits<int>::min();
+    }
+
     for (int i = 0; i < list.size; ++i) {
         const Move move = list.moves[i];
         if (tt_legal_ && move == tt_move_)
             continue;
         if (!legal_fast(pos_, mem_, info_, move))
             continue;
-        add_quiet(move);
+
+        QuietCandidate candidate{};
+        candidate.move = move;
+        candidate.history_score = history_.quiet_value_fast(pos_, move);
+        candidate.countermove = !move_is_none(countermove) && move == countermove;
+
+        const int candidate_index = candidate_count;
+        candidates[candidate_count++] = candidate;
+
+        if (keep_top_history == 0 ||
+            candidate.countermove ||
+            move == killer1_ ||
+            move == killer2_) {
+            continue;
+        }
+
+        int insert_at = keep_top_history;
+        for (int j = 0; j < keep_top_history; ++j) {
+            if (candidate.history_score > top_scores[j]) {
+                insert_at = j;
+                break;
+            }
+        }
+
+        if (insert_at >= keep_top_history)
+            continue;
+
+        for (int j = keep_top_history - 1; j > insert_at; --j) {
+            top_scores[j] = top_scores[j - 1];
+            top_indices[j] = top_indices[j - 1];
+        }
+
+        top_scores[insert_at] = candidate.history_score;
+        top_indices[insert_at] = candidate_index;
+    }
+
+    for (int i = 0; i < keep_top_history; ++i) {
+        if (top_indices[i] >= 0)
+            candidates[top_indices[i]].top_history = true;
+    }
+
+    const int quiet_limit = std::max(0, quiet_control_.quiet_limit);
+    int late_quiet_count = 0;
+    for (int i = 0; i < candidate_count; ++i) {
+        const QuietCandidate& candidate = candidates[i];
+        const bool exempt =
+            candidate.countermove ||
+            candidate.top_history;
+        const bool quiet_in_skip_band =
+            !exempt &&
+            late_quiet_count >= quiet_limit;
+        bool quiet_suppressed = false;
+        if (quiet_in_skip_band &&
+            candidate.history_score <= quiet_control_.history_floor &&
+            !move_gives_check(pos_, mem_, candidate.move)) {
+            quiet_suppressed = true;
+        }
+
+        add_quiet(
+            candidate.move,
+            candidate.history_score,
+            quiet_in_skip_band,
+            quiet_suppressed
+        );
+
+        if (!exempt)
+            ++late_quiet_count;
     }
 }
 
@@ -233,8 +344,20 @@ void MovePicker::add_capture(Move move) noexcept {
     }
 }
 
-void MovePicker::add_quiet(Move move) noexcept {
-    const int score = score_quiet(move);
+void MovePicker::add_quiet(
+    Move move,
+    int history_score,
+    bool quiet_in_skip_band,
+    bool quiet_suppressed
+) noexcept {
+    ++quiet_generated_;
+
+    const bool full_score = !quiet_suppressed;
+    const int score = full_score ? score_quiet(move) : history_score;
+    if (full_score)
+        ++quiet_scored_;
+    else
+        ++quiet_suppressed_;
 
     if (move == killer1_) {
         killer1_ready_ = true;
@@ -253,7 +376,9 @@ void MovePicker::add_quiet(Move move) noexcept {
     quiets_[quiet_size_] = ScoredEntry{
         move,
         score,
-        0
+        0,
+        quiet_in_skip_band,
+        quiet_suppressed
     };
     ++quiet_size_;
 }

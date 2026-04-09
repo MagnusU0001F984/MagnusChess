@@ -55,4 +55,26 @@ WinRateParams win_rate_params(const Position& pos) noexcept;
 int to_cp(int v, const Position& pos) noexcept;
 int win_rate_model(int v, const Position& pos) noexcept;
 
+// Incremental accumulator hooks wired into Position's board mutators.
+void on_position_cleared(Position& pos) noexcept;
+void on_piece_added(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept;
+void on_piece_removed(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept;
+void on_piece_moved(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square from,
+    Square to
+) noexcept;
+
 } // namespace valerain::nnue

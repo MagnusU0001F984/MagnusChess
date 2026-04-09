@@ -44,6 +44,16 @@ enum class MoveStage : std::uint8_t {
     DONE
 };
 
+struct QuietControl {
+    // Enables node-driven late quiet suppression in the picker. This is not a
+    // global hard skip; it only demotes low-value late quiets to cheaper
+    // history-only ordering.
+    bool skip_quiets = false;
+    int quiet_limit = 0;
+    int history_floor = 0;
+    int keep_top_history = 0;
+};
+
 /*
 MovePicker emits legal moves in staged order:
 TT move -> good captures -> killers -> quiets -> bad captures.
@@ -61,7 +71,8 @@ public:
         int ply,
         Move prev_move,
         Move prev2_move,
-        int depth
+        int depth,
+        QuietControl quiet_control = {}
     ) noexcept;
 
     [[nodiscard]] Move next() noexcept;
@@ -70,12 +81,19 @@ public:
     [[nodiscard]] bool last_was_capture() const noexcept { return last_was_capture_; }
     [[nodiscard]] bool last_was_bad_capture() const noexcept { return last_was_bad_capture_; }
     [[nodiscard]] int last_see_value() const noexcept { return last_see_value_; }
+    [[nodiscard]] bool last_quiet_in_skip_band() const noexcept { return last_quiet_in_skip_band_; }
+    [[nodiscard]] bool last_quiet_suppressed() const noexcept { return last_quiet_suppressed_; }
+    [[nodiscard]] int quiet_generated() const noexcept { return quiet_generated_; }
+    [[nodiscard]] int quiet_scored() const noexcept { return quiet_scored_; }
+    [[nodiscard]] int quiet_suppressed() const noexcept { return quiet_suppressed_; }
 
 private:
     struct ScoredEntry {
         Move move = 0;
         int score = 0;
         int see_value = 0;
+        bool quiet_in_skip_band = false;
+        bool quiet_suppressed = false;
     };
 
     Position& pos_;
@@ -89,6 +107,7 @@ private:
     Move prev_move_ = Move(0);
     Move prev2_move_ = Move(0);
     int depth_ = 0;
+    QuietControl quiet_control_{};
 
     MoveStage stage_ = MoveStage::TT_MOVE;
 
@@ -123,13 +142,23 @@ private:
     bool last_was_capture_ = false;
     bool last_was_bad_capture_ = false;
     int last_see_value_ = 0;
+    bool last_quiet_in_skip_band_ = false;
+    bool last_quiet_suppressed_ = false;
+    int quiet_generated_ = 0;
+    int quiet_scored_ = 0;
+    int quiet_suppressed_ = 0;
 
 private:
     void prepare_tt_move() noexcept;
     void build_capture_stage() noexcept;
     void build_quiet_stage() noexcept;
     void add_capture(Move move) noexcept;
-    void add_quiet(Move move) noexcept;
+    void add_quiet(
+        Move move,
+        int history_score,
+        bool quiet_in_skip_band,
+        bool quiet_suppressed
+    ) noexcept;
 
     [[nodiscard]] int score_capture(Move move, int see_value) const noexcept;
     [[nodiscard]] int score_quiet(Move move) const noexcept;
@@ -144,12 +173,16 @@ private:
         int score,
         bool capture,
         bool bad_capture,
-        int see_value
+        int see_value,
+        bool quiet_in_skip_band = false,
+        bool quiet_suppressed = false
     ) noexcept {
         last_score_ = score;
         last_was_capture_ = capture;
         last_was_bad_capture_ = bad_capture;
         last_see_value_ = see_value;
+        last_quiet_in_skip_band_ = quiet_in_skip_band;
+        last_quiet_suppressed_ = quiet_suppressed;
     }
 };
 

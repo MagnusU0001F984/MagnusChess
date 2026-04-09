@@ -24,6 +24,9 @@ SOFTWARE.
 
 #pragma once
 
+#include <array>
+
+#include "NnueLayout.h"
 #include "Types.h"
 
 namespace valerain {
@@ -54,6 +57,12 @@ struct Position {
     Key key = 0;
 
     int board[SQ_NB];
+
+    // NNUE keeps dual-perspective hidden-layer accumulators inside Position so
+    // make/unmake and copy-make paths can share the same incremental state.
+    mutable u32 nnue_generation = 0;
+    mutable bool nnue_acc_valid = false;
+    alignas(64) mutable std::array<std::array<i16, nnue::kHiddenSize>, COLOR_NB> nnue_acc{};
 };
 
 struct StateInfo {

@@ -118,8 +118,13 @@ inline void push_position_history(
 }
 
 [[nodiscard]] std::string default_eval_file() {
-    // Try a few common in-tree NNUE locations so the engine can work out of the box.
+    // Prefer the repo-root bundled default, then fall back to in-tree legacy paths.
+    constexpr const char* preferred = "Evalfile.bin";
+    if (std::filesystem::exists(preferred))
+        return preferred;
+
     constexpr const char* candidates[] = {
+        "src/bin/quantised.bin",
         "NnueFile/nn-2a5d6101d177.nnue",
         "src/NnueFile/nn-2a5d6101d177.nnue",
         "NnueFile/nn-37f18f62d772.nnue",
@@ -130,7 +135,7 @@ inline void push_position_history(
         if (std::filesystem::exists(candidate))
             return candidate;
 
-    return candidates[0];
+    return preferred;
 }
 
 [[nodiscard]] bool parse_int(std::string_view sv, int& value) noexcept {
@@ -641,7 +646,7 @@ struct UciSession {
     Position pos{};
     PositionHistory position_history{};
     timeman::TimeManager time_manager{};
-    bool use_nnue = false;
+    bool use_nnue = true;
     std::string eval_file = default_eval_file();
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
@@ -674,15 +679,15 @@ struct UciSession {
     }
 
     void emit_banner(std::ostream& out) const {
-        out << "Valerain 0.0.6 by the Magnus developer" << std::endl;
+        out << "Valerain 0.0.7 by the Magnus developer" << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name Valerain 0.0.6\n";
+        out << "id name Valerain 0.0.7\n";
         out << "id author Magnus\n";
         out << "option name Hash type spin default 64 min 1 max 33554432\n";
         out << "option name Clear Hash type button\n";
-        out << "option name UseNNUE type check default false\n";
+        out << "option name UseNNUE type check default true\n";
         out << "option name EvalFile type string default " << eval_file << '\n';
         out << "uciok\n";
     }
@@ -713,12 +718,12 @@ struct UciSession {
     }
 
     void handle_eval(std::ostream& out) {
+        if (use_nnue && !nnue::loaded())
+            (void)ensure_nnue_loaded(eval_file, nullptr);
+
         out << "info string eval " << active_eval_name(use_nnue) << '\n';
         const int hce_stm = eval::evaluate(pos);
         out << "info string hce cp " << white_pov_score(pos, hce_stm) << '\n';
-
-        if (!nnue::loaded())
-            (void)ensure_nnue_loaded(eval_file, nullptr);
 
         if (nnue::loaded()) {
             const int raw_stm = nnue::eval(pos);

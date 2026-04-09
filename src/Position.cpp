@@ -25,6 +25,7 @@ SOFTWARE.
 #include "Position.h"
 #include "Evaluation.h"
 #include "MoveGen.h"
+#include "Nnue.h"
 #include "Tables.h"
 
 #include <bit>
@@ -144,9 +145,15 @@ void position_clear(Position& pos) noexcept {
     pos.eval_eg[BLACK] = 0;
     pos.eval_phase = 0;
     pos.key = 0;
+    pos.nnue_generation = 0;
+    pos.nnue_acc_valid = false;
+    for (auto& acc : pos.nnue_acc)
+        acc.fill(0);
 
     for (int sq = 0; sq < SQ_NB; ++sq)
         pos.board[sq] = PIECE_NONE;
+
+    nnue::on_position_cleared(pos);
 }
 
 void position_recompute_occupied(Position& pos) noexcept {
@@ -215,6 +222,7 @@ void position_put_piece(
     pos.occupied |= bb;
     pos.board[sq] = static_cast<int>(make_piece(color, piece_type));
     eval::on_piece_added(pos, color, piece_type, sq);
+    nnue::on_piece_added(pos, color, piece_type, sq);
 
     if (piece_type == KING)
         pos.king_sq[color] = sq;
@@ -233,6 +241,7 @@ void position_remove_piece(
     pos.occupied &= ~bb;
     pos.board[sq] = PIECE_NONE;
     eval::on_piece_removed(pos, color, piece_type, sq);
+    nnue::on_piece_removed(pos, color, piece_type, sq);
 
     if (piece_type == KING)
         pos.king_sq[color] = NO_SQ;
@@ -257,6 +266,7 @@ void position_move_piece(
     pos.board[from] = PIECE_NONE;
     pos.board[to] = static_cast<int>(make_piece(color, piece_type));
     eval::on_piece_moved(pos, color, piece_type, from, to);
+    nnue::on_piece_moved(pos, color, piece_type, from, to);
 
     if (piece_type == KING)
         pos.king_sq[color] = to;

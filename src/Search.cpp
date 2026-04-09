@@ -58,8 +58,17 @@ constexpr int VALUE_MATE = 31000;
 constexpr int VALUE_NONE = 32002;
 constexpr int DELTA_MARGIN = 200;
 constexpr int QS_ADJ_SHUFFLE_CAP = 80;
-constexpr int FUTILITY_MARGIN[3] = { 0, 120, 240 };
-constexpr int REVERSE_FUTILITY_MARGIN[4] = { 0, 90, 180, 300 };
+constexpr int FUTILITY_BASE_MARGIN = 72;
+constexpr int FUTILITY_DEPTH_MARGIN = 72;
+constexpr int FUTILITY_IMPROVING_MARGIN = 24;
+constexpr int FUTILITY_HISTORY_DIVISOR = 128;
+constexpr int RFP_BASE_MARGIN = 56;
+constexpr int RFP_DEPTH_MARGIN = 72;
+constexpr int RFP_IMPROVING_MARGIN = 40;
+constexpr int RFP_CORRECTION_THRESHOLD = 128;
+constexpr int RFP_CORRECTION_MARGIN_BONUS = 8;
+constexpr int RFP_TT_CAPTURE_MARGIN_REDUCTION = 16;
+constexpr int RFP_TT_QUIET_FAIL_HIGH_BONUS = 24;
 constexpr int RAZOR_MARGIN[3] = { 0, 280, 420 };
 constexpr int ASPIRATION_DELTA = 24;
 constexpr int REPETITION_AVOID_SCORE = -16;
@@ -137,7 +146,7 @@ constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
 #endif
 
 #ifndef VALERAIN_MOVEPICKER_OBS
-#define VALERAIN_MOVEPICKER_OBS 0
+#define VALERAIN_MOVEPICKER_OBS 1
 #endif
 
 constexpr int piece_order_value[PIECE_TYPE_NB] = {
@@ -282,6 +291,13 @@ struct Searcher {
         u64 first_killer_cutoff = 0;
         u64 first_quiet_try = 0;
         u64 first_quiet_cutoff = 0;
+
+        u64 quiet_generated = 0;
+        u64 quiet_scored = 0;
+        u64 quiet_skipped_by_mp = 0;
+        u64 quiet_searched = 0;
+        u64 late_quiet_fail_high = 0;
+        u64 quiet_fail_high_after_skip_band = 0;
     } mp_obs{};
 #endif
 
@@ -616,6 +632,17 @@ struct Searcher {
             << " (" << mp_ratio_percent(mp_obs.first_killer_cutoff, mp_obs.first_killer_try) << "%) "
             << "quiet " << mp_obs.first_quiet_cutoff << '/' << mp_obs.first_quiet_try
             << " (" << mp_ratio_percent(mp_obs.first_quiet_cutoff, mp_obs.first_quiet_try) << "%)\n";
+
+        out << "info string mpobs quiet_work "
+            << "generated " << mp_obs.quiet_generated
+            << " scored " << mp_obs.quiet_scored
+            << " quiet_skipped_by_mp " << mp_obs.quiet_skipped_by_mp
+            << " searched " << mp_obs.quiet_searched << '\n';
+
+        out << "info string mpobs quiet_failhigh "
+            << "late_quiet_fail_high " << mp_obs.late_quiet_fail_high
+            << " quiet_fail_high_after_skip_band " << mp_obs.quiet_fail_high_after_skip_band
+            << '\n';
     }
 #endif
 
@@ -704,12 +731,104 @@ struct Searcher {
         return gain;
     }
 
-    [[nodiscard]] static inline int lmp_limit(int depth) noexcept {
-        return 2 + depth * 3;
+    [[nodiscard]] static inline int reverse_futility_margin(
+        int depth,
+        bool improving,
+        int correction,
+        Move tt_move,
+        memory::Bound tt_bound,
+        int tt_score,
+        int beta
+    ) noexcept {
+        int margin = RFP_BASE_MARGIN
+            + depth * RFP_DEPTH_MARGIN
+            - (improving ? RFP_IMPROVING_MARGIN : 0);
+
+        if (correction > RFP_CORRECTION_THRESHOLD)
+            margin += RFP_CORRECTION_MARGIN_BONUS;
+
+        if (!move_is_none(tt_move) && move_is_capture(tt_move)) {
+            margin = std::max(0, margin - RFP_TT_CAPTURE_MARGIN_REDUCTION);
+        } else if (!move_is_none(tt_move) &&
+                   (tt_bound == memory::BOUND_LOWER || tt_bound == memory::BOUND_EXACT) &&
+                   tt_score >= beta) {
+            margin += RFP_TT_QUIET_FAIL_HIGH_BONUS;
+        }
+
+        return margin;
     }
 
-    [[nodiscard]] static inline int history_prune_threshold(int depth) noexcept {
-        return -depth * depth * 4;
+    [[nodiscard]] static inline int futility_margin(
+        int depth,
+        bool improving,
+        int history_score
+    ) noexcept {
+        return FUTILITY_BASE_MARGIN
+            + depth * FUTILITY_DEPTH_MARGIN
+            - (improving ? FUTILITY_IMPROVING_MARGIN : 0)
+            + std::clamp(
+                history_score / FUTILITY_HISTORY_DIVISOR,
+                -64,
+                64
+            );
+    }
+
+    [[nodiscard]] static inline int lmp_limit(int depth, bool improving) noexcept {
+        const int d = std::clamp(depth, 1, 11);
+        if (improving)
+            return 4 + (4 * d * d) / 5;
+        return 2 + (2 * d * d) / 5;
+    }
+
+    [[nodiscard]] static inline int history_prune_threshold(
+        int depth,
+        bool improving
+    ) noexcept {
+        const int coeff = improving ? 5 : 3;
+        return -depth * depth * coeff;
+    }
+
+    [[nodiscard]] static inline QuietControl quiet_control_for_node(
+        int depth,
+        bool improving,
+        int static_eval,
+        int alpha,
+        Move tt_move,
+        int node_history_signal
+    ) noexcept {
+        QuietControl control{};
+        if (depth < 5)
+            return control;
+
+        control.skip_quiets = true;
+        control.keep_top_history = 4;
+        control.quiet_limit = std::max(4, lmp_limit(depth, improving) / 2);
+
+        if (!improving)
+            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+        if (static_eval <= alpha)
+            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+        if (node_history_signal < 0)
+            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+
+        if (!move_is_none(tt_move) && !move_is_capture(tt_move)) {
+            ++control.quiet_limit;
+        } else if (!move_is_none(tt_move)) {
+            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+        }
+
+        control.history_floor = history_prune_threshold(depth, improving) - 64;
+        if (static_eval <= alpha)
+            control.history_floor += 32;
+        if (!improving)
+            control.history_floor += 16;
+        if (node_history_signal < 0)
+            control.history_floor += std::min(32, -node_history_signal);
+        if (!move_is_none(tt_move) && !move_is_capture(tt_move))
+            control.history_floor -= 32;
+
+        control.history_floor = std::clamp(control.history_floor, -512, -32);
+        return control;
     }
 
     [[nodiscard]] inline u64 global_nodes() const noexcept {
@@ -1405,6 +1524,7 @@ struct Searcher {
         const StaticEvalInfo eval_info = resolve_static_eval(pos, probe, ply, checked, false);
         const int raw_eval = eval_info.raw;
         const int static_eval = eval_info.corrected;
+        const int correction = static_eval - raw_eval;
         store_static_eval(ply, static_eval);
         const bool improving = !checked && improving_position(ply, static_eval);
         const Color side = static_cast<Color>(pos.side_to_move);
@@ -1431,12 +1551,20 @@ struct Searcher {
 
         if (!pv_node &&
             !checked &&
-            search_depth <= 3 &&
+            search_depth <= 6 &&
             !is_mate_window(beta) &&
-            static_eval - REVERSE_FUTILITY_MARGIN[search_depth] >= beta) {
+            static_eval - reverse_futility_margin(
+                search_depth,
+                improving,
+                correction,
+                tt_move,
+                tt_bound,
+                probed_tt_score,
+                beta
+            ) >= beta) {
             // Reverse futility: when static eval is already safely above beta,
             // a shallow node often does not need a full search.
-            return static_eval;
+            return beta + (static_eval - beta) / 3;
         }
 
         const bool nmp_disabled_here = nmp_disabled_for_ply(ply, nmp_min_ply);
@@ -1608,6 +1736,23 @@ struct Searcher {
 
         const Move prev_move = (ply > 0) ? move_stack[ply - 1] : Move(0);
         const Move prev2_move = (ply > 1) ? move_stack[ply - 2] : Move(0);
+        QuietControl quiet_control{};
+        if (!pv_node && !checked) {
+            int node_history_signal = 0;
+            if (ply > 0)
+                node_history_signal += search_stack[ply - 1].stat_score / 256;
+            if (ply > 1)
+                node_history_signal += search_stack[ply - 2].stat_score / 512;
+
+            quiet_control = quiet_control_for_node(
+                search_depth,
+                improving,
+                static_eval,
+                alpha,
+                tt_move,
+                node_history_signal
+            );
+        }
         MovePicker picker(
             pos,
             mem,
@@ -1617,7 +1762,8 @@ struct Searcher {
             ply,
             prev_move,
             prev2_move,
-            search_depth
+            search_depth,
+            quiet_control
         );
 #if VALERAIN_MOVEPICKER_OBS
         ++mp_obs.nodes;
@@ -1801,18 +1947,20 @@ struct Searcher {
 
             if (!pv_node &&
                 !checked &&
-                search_depth <= 2 &&
+                search_depth <= 4 &&
                 quiet_move &&
-                static_eval + FUTILITY_MARGIN[search_depth] <= alpha) {
+                !ensure_gives_check() &&
+                static_eval + futility_margin(search_depth, improving, history_score) <= alpha) {
                 // Shallow futility pruning skips quiet moves that cannot raise alpha.
                 continue;
             }
 
             if (!pv_node &&
                 !checked &&
-                search_depth <= 4 &&
+                search_depth <= 7 &&
                 quiet_move &&
-                quiet_count > lmp_limit(search_depth) &&
+                !ensure_gives_check() &&
+                quiet_count > lmp_limit(search_depth, improving) &&
                 static_eval <= alpha) {
                 // Late move pruning drops very late quiets once enough earlier
                 // quiets have already been searched with no improvement.
@@ -1821,10 +1969,11 @@ struct Searcher {
 
             if (!pv_node &&
                 !checked &&
-                search_depth <= 4 &&
+                search_depth <= 6 &&
                 quiet_move &&
-                quiet_count > lmp_limit(search_depth) / 2 &&
-                history_score <= history_prune_threshold(search_depth)) {
+                !ensure_gives_check() &&
+                quiet_count > std::max(2, lmp_limit(search_depth, improving) / 2) &&
+                history_score <= history_prune_threshold(search_depth, improving)) {
                 // History pruning removes quiets that are both late and historically bad.
                 continue;
             }
@@ -2003,6 +2152,10 @@ struct Searcher {
 
             if (quiet_move)
                 searched_quiets[searched_quiet_count++] = move;
+#if VALERAIN_MOVEPICKER_OBS
+            if (quiet_move)
+                ++mp_obs.quiet_searched;
+#endif
             if (capture_move) {
                 searched_capture_see[searched_capture_count] = move_see_value;
                 searched_captures[searched_capture_count++] = move;
@@ -2024,6 +2177,10 @@ struct Searcher {
                         ++mp_obs.first_killer_cutoff;
                     if (first_quiet_this)
                         ++mp_obs.first_quiet_cutoff;
+                    if (quiet_move && picker.last_quiet_in_skip_band())
+                        ++mp_obs.late_quiet_fail_high;
+                    if (quiet_move && picker.last_quiet_suppressed())
+                        ++mp_obs.quiet_fail_high_after_skip_band;
 #endif
 #if VALERAIN_CAPTURE_OBS
                     if (capture_move)
@@ -2067,6 +2224,12 @@ struct Searcher {
                 }
             }
         }
+
+#if VALERAIN_MOVEPICKER_OBS
+        mp_obs.quiet_generated += static_cast<u64>(picker.quiet_generated());
+        mp_obs.quiet_scored += static_cast<u64>(picker.quiet_scored());
+        mp_obs.quiet_skipped_by_mp += static_cast<u64>(picker.quiet_suppressed());
+#endif
 
         if (legal_count == 0) {
             const int score = exclusion_search ? alpha : (checked ? (-VALUE_MATE + ply) : 0);

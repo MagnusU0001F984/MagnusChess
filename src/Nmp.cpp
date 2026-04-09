@@ -30,9 +30,10 @@ namespace valerain::search {
 
 namespace {
 
-constexpr int NMP_STATIC_BASE = 350;
-constexpr int NMP_STATIC_DEPTH_SLOPE = 18;
-constexpr int NMP_EVAL_BUCKET = 128;
+constexpr int NMP_STATIC_BASE = 160;
+constexpr int NMP_STATIC_DEPTH_SLOPE = 8;
+constexpr int NMP_IMPROVING_MARGIN = 64;
+constexpr int NMP_EVAL_BUCKET = 96;
 constexpr int NMP_MIN_REDUCTION = 2;
 constexpr int NMP_VERIFICATION_MIN_DEPTH = 16;
 constexpr int NMP_VERIFICATION_MIN_SPAN = 2;
@@ -45,7 +46,11 @@ bool nmp_disabled_for_ply(int ply, int nmp_min_ply) noexcept {
 
 NmpDecision decide_null_move(const NmpNodeContext& node) noexcept {
     NmpDecision decision{};
-    decision.eval_gate = node.beta - NMP_STATIC_DEPTH_SLOPE * node.depth + NMP_STATIC_BASE;
+    decision.eval_gate =
+        node.beta
+        - NMP_STATIC_DEPTH_SLOPE * node.depth
+        + NMP_STATIC_BASE
+        - (node.improving ? NMP_IMPROVING_MARGIN : 0);
     decision.eval_margin = node.static_eval - node.beta;
 
     if (!node.allow_null ||
@@ -66,7 +71,7 @@ NmpDecision decide_null_move(const NmpNodeContext& node) noexcept {
     }
 
     int reduction = NMP_MIN_REDUCTION + node.depth / 4;
-    reduction += std::clamp(decision.eval_margin / NMP_EVAL_BUCKET, 0, 2);
+    reduction += std::clamp(decision.eval_margin / NMP_EVAL_BUCKET, 0, 3);
     if (node.cut_node)
         ++reduction;
     if (!node.improving)

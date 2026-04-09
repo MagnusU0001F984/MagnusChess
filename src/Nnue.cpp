@@ -30,6 +30,7 @@ SOFTWARE.
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <immintrin.h>
 #include <string>
 
 namespace valerain::nnue {
@@ -43,9 +44,9 @@ using u32 = std::uint32_t;
 constexpr u32 kMagic   = 0x554E4E56u; // "VNNU" in little-endian file bytes
 constexpr u32 kVersion = 1;
 
-constexpr int kInputs = 768;   // 2 colors * 6 piece types * 64 squares
-constexpr int kHidden = 128;
-constexpr int kClip   = 255;
+constexpr int kInputs = kInputSize;
+constexpr int kHidden = kHiddenSize;
+constexpr int kClip   = kActivationClip;
 constexpr int kDefaultScale = 400;
 
 struct FileHeader {
@@ -73,6 +74,7 @@ struct NativeNetwork {
 };
 
 NativeNetwork g_net{};
+u32 g_generation = 1;
 
 template<typename T>
 [[nodiscard]] T read_le(std::istream& in) {
@@ -120,25 +122,141 @@ template<typename T>
     return (color_plane * 6 + plane) * 64 + static_cast<int>(osq);
 }
 
-void clear_network() noexcept {
-    g_net.is_loaded = false;
-    g_net.loaded_path.clear();
-    g_net.desc.clear();
-    g_net.error.clear();
-    g_net.scale = kDefaultScale;
-    g_net.w0.fill(0);
-    g_net.b0.fill(0);
-    g_net.w1.fill(0);
-    g_net.b1 = 0;
+[[nodiscard]] inline bool accumulator_matches(const Position& pos) noexcept {
+    return pos.nnue_acc_valid && pos.nnue_generation == g_generation;
 }
 
-void refresh_hidden(
-    const Position& pos,
-    Color persp,
-    i32* acc
+inline void invalidate_accumulator(Position& pos) noexcept {
+    pos.nnue_acc_valid = false;
+    pos.nnue_generation = g_generation;
+}
+
+#if defined(__AVX2__)
+inline void apply_feature_delta_avx2(
+    std::array<i16, kHidden>& acc,
+    const i16* weights,
+    bool add
 ) noexcept {
+    i16* acc_ptr = acc.data();
+    for (int i = 0; i < kHidden; i += 16) {
+        __m256i acc_vec =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc_ptr + i));
+        const __m256i weight_vec =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(weights + i));
+
+        if (add) {
+            acc_vec = _mm256_add_epi16(acc_vec, weight_vec);
+        } else {
+            acc_vec = _mm256_sub_epi16(acc_vec, weight_vec);
+        }
+
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(acc_ptr + i), acc_vec);
+    }
+}
+
+inline void apply_feature_move_delta_avx2(
+    std::array<i16, kHidden>& acc,
+    const i16* add_weights,
+    const i16* sub_weights
+) noexcept {
+    i16* acc_ptr = acc.data();
+    for (int i = 0; i < kHidden; i += 16) {
+        __m256i acc_vec =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(acc_ptr + i));
+        const __m256i add_vec =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add_weights + i));
+        const __m256i sub_vec =
+            _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub_weights + i));
+
+        acc_vec = _mm256_add_epi16(acc_vec, _mm256_sub_epi16(add_vec, sub_vec));
+
+        _mm256_storeu_si256(reinterpret_cast<__m256i*>(acc_ptr + i), acc_vec);
+    }
+}
+
+#endif
+
+inline void apply_feature_delta(
+    std::array<i16, kHidden>& acc,
+    int feature_index,
+    int delta
+) noexcept {
+    const i16* w = &g_net.w0[static_cast<std::size_t>(feature_index) * kHidden];
+#if defined(__AVX2__)
+    apply_feature_delta_avx2(acc, w, delta > 0);
+    return;
+#endif
+    if (delta > 0) {
+        for (int i = 0; i < kHidden; ++i)
+            acc[i] = static_cast<i16>(static_cast<i32>(acc[i]) + static_cast<i32>(w[i]));
+        return;
+    }
+
     for (int i = 0; i < kHidden; ++i)
-        acc[i] = g_net.b0[i];
+        acc[i] = static_cast<i16>(static_cast<i32>(acc[i]) - static_cast<i32>(w[i]));
+}
+
+inline void apply_feature_move_delta(
+    std::array<i16, kHidden>& acc,
+    int add_feature_index,
+    int sub_feature_index
+) noexcept {
+    const i16* add = &g_net.w0[static_cast<std::size_t>(add_feature_index) * kHidden];
+    const i16* sub = &g_net.w0[static_cast<std::size_t>(sub_feature_index) * kHidden];
+#if defined(__AVX2__)
+    apply_feature_move_delta_avx2(acc, add, sub);
+    return;
+#endif
+    for (int i = 0; i < kHidden; ++i)
+        acc[i] = static_cast<i16>(
+            static_cast<i32>(acc[i]) +
+            static_cast<i32>(add[i]) -
+            static_cast<i32>(sub[i])
+        );
+}
+
+inline void apply_piece_delta(
+    Position& pos,
+    Color piece_color,
+    PieceType piece_type,
+    Square sq,
+    int delta
+) noexcept {
+    const Piece pc = make_piece(piece_color, piece_type);
+    for (int persp = WHITE; persp <= BLACK; ++persp) {
+        const int idx = chess768_index(static_cast<Color>(persp), pc, sq);
+        if (idx >= 0)
+            apply_feature_delta(pos.nnue_acc[persp], idx, delta);
+    }
+}
+
+inline void apply_piece_move_delta(
+    Position& pos,
+    Color piece_color,
+    PieceType piece_type,
+    Square from,
+    Square to
+) noexcept {
+    const Piece pc = make_piece(piece_color, piece_type);
+    for (int persp = WHITE; persp <= BLACK; ++persp) {
+        const Color perspective = static_cast<Color>(persp);
+        const int sub_idx = chess768_index(perspective, pc, from);
+        const int add_idx = chess768_index(perspective, pc, to);
+        if (sub_idx >= 0 && add_idx >= 0) {
+            apply_feature_move_delta(pos.nnue_acc[persp], add_idx, sub_idx);
+            continue;
+        }
+
+        if (sub_idx >= 0)
+            apply_feature_delta(pos.nnue_acc[persp], sub_idx, -1);
+        if (add_idx >= 0)
+            apply_feature_delta(pos.nnue_acc[persp], add_idx, 1);
+    }
+}
+
+void rebuild_accumulator(const Position& pos) noexcept {
+    for (int persp = WHITE; persp <= BLACK; ++persp)
+        pos.nnue_acc[persp] = g_net.b0;
 
     Bitboard bb = pieces(pos);
     while (bb) {
@@ -147,14 +265,42 @@ void refresh_hidden(
         bb &= (bb - 1);
 
         const Piece pc = piece_on(pos, sq);
-        const int idx = chess768_index(persp, pc, sq);
-        if (idx < 0)
+        if (pc == PIECE_NONE)
             continue;
 
-        const i16* w = &g_net.w0[static_cast<std::size_t>(idx) * kHidden];
-        for (int i = 0; i < kHidden; ++i)
-            acc[i] += w[i];
+        for (int persp = WHITE; persp <= BLACK; ++persp) {
+            const int idx = chess768_index(static_cast<Color>(persp), pc, sq);
+            if (idx < 0)
+                continue;
+
+            apply_feature_delta(pos.nnue_acc[persp], idx, 1);
+        }
     }
+
+    pos.nnue_generation = g_generation;
+    pos.nnue_acc_valid = true;
+}
+
+inline void ensure_accumulator(const Position& pos) noexcept {
+    if (!accumulator_matches(pos))
+        rebuild_accumulator(pos);
+}
+
+void clear_network() noexcept {
+    ++g_generation;
+    if (g_generation == 0)
+        ++g_generation;
+
+    g_net.is_loaded = false;
+    g_net.loaded_path.clear();
+    g_net.desc.clear();
+    g_net.error.clear();
+    g_net.scale = kDefaultScale;
+    g_net.is_bullet_simple = false;
+    g_net.w0.fill(0);
+    g_net.b0.fill(0);
+    g_net.w1.fill(0);
+    g_net.b1 = 0;
 }
 
 [[nodiscard]] inline i32 screlu(i32 x) noexcept {
@@ -163,20 +309,16 @@ void refresh_hidden(
 }
 
 [[nodiscard]] int forward(const Position& pos) noexcept {
-    alignas(64) i32 us[kHidden];
-    alignas(64) i32 them[kHidden];
-
     const Color stm = static_cast<Color>(pos.side_to_move);
     const Color nstm = opposite(stm);
-
-    refresh_hidden(pos, stm, us);
-    refresh_hidden(pos, nstm, them);
-
+    ensure_accumulator(pos);
+    const auto& us = pos.nnue_acc[stm];
+    const auto& them = pos.nnue_acc[nstm];
     i32 sum = 0;
 
     for (int i = 0; i < kHidden; ++i) {
-        sum += static_cast<i32>(g_net.w1[i]) * screlu(us[i]);
-        sum += static_cast<i32>(g_net.w1[kHidden + i]) * screlu(them[i]);
+        sum += static_cast<i32>(g_net.w1[i]) * screlu(static_cast<i32>(us[i]));
+        sum += static_cast<i32>(g_net.w1[kHidden + i]) * screlu(static_cast<i32>(them[i]));
     }
 
     sum /= kClip;                     // divide by QA
@@ -310,6 +452,47 @@ int eval(const Position& pos) noexcept {
     if (!g_net.is_loaded)
         return 0;
     return forward(pos);
+}
+
+void on_position_cleared(Position& pos) noexcept {
+    invalidate_accumulator(pos);
+}
+
+void on_piece_added(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    if (!g_net.is_loaded || !accumulator_matches(pos))
+        return;
+
+    apply_piece_delta(pos, color, piece_type, sq, 1);
+}
+
+void on_piece_removed(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    if (!g_net.is_loaded || !accumulator_matches(pos))
+        return;
+
+    apply_piece_delta(pos, color, piece_type, sq, -1);
+}
+
+void on_piece_moved(
+    Position& pos,
+    Color color,
+    PieceType piece_type,
+    Square from,
+    Square to
+) noexcept {
+    if (!g_net.is_loaded || !accumulator_matches(pos))
+        return;
+
+    apply_piece_move_delta(pos, color, piece_type, from, to);
 }
 
 WinRateParams win_rate_params(const Position& pos) noexcept {
