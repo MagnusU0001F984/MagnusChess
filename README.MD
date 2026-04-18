@@ -65,6 +65,8 @@ Valerain is a C++20 chess engine with UCI support, a classical search core, opti
 ### 8. Time Management and UCI
 - Standard UCI commands:
   - `uci / isready / position / go / stop / quit / setoption`
+- Exposed UCI options:
+  - `Hash / Threads / Contempt / Clear Hash / UseNNUE / Ponder / EvalFile`
 - `go` supports:
   - depth, nodes, movetime, wtime/btime/inc/movestogo
 - TimeManager adapts time usage with recent-search history

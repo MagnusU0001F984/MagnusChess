@@ -50,6 +50,7 @@ struct SearchLimits {
     u64 node_limit = 0;
     int soft_time_ms = 0;
     int hard_time_ms = 0;
+    int contempt = 0;
     bool ponder = false;
     bool infinite = false;
     bool use_nnue = false;

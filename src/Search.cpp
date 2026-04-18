@@ -225,6 +225,7 @@ struct Searcher {
     u64 base_nodes = 0;
     u64 published_nodes = 0;
     int seldepth = 0;
+    int root_side_to_move = WHITE;
     HistoryTables history_tables{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
@@ -1146,10 +1147,21 @@ struct Searcher {
         return false;
     }
 
-    [[nodiscard]] inline int repetition_score(int eval_hint) const noexcept {
+    [[nodiscard]] inline int draw_score(int side_to_move) const noexcept {
+        const int random_component = static_cast<int>(nodes & 0x3ULL) - 2;
+        const int contempt_component =
+            side_to_move == root_side_to_move ? -limits.contempt : limits.contempt;
+        return random_component + contempt_component;
+    }
+
+    [[nodiscard]] inline int repetition_score(
+        int side_to_move,
+        int eval_hint
+    ) const noexcept {
+        const int base_draw = draw_score(side_to_move);
         if (eval_hint == VALUE_NONE)
-            return 0;
-        return eval_hint > 0 ? REPETITION_AVOID_SCORE : 0;
+            return base_draw;
+        return base_draw + (eval_hint > 0 ? REPETITION_AVOID_SCORE : 0);
     }
 
     [[nodiscard]] bool has_null_move_pruning_material(
@@ -1410,7 +1422,7 @@ struct Searcher {
             return evaluate_search_position(pos);
 
         if (pos.halfmove_clock >= 100)
-            return 0;
+            return draw_score(pos.side_to_move);
 
         alpha = std::max(alpha, -VALUE_MATE + ply);
         beta = std::min(beta, VALUE_MATE - ply - 1);
@@ -1421,7 +1433,7 @@ struct Searcher {
         const bool pv_node = (beta - alpha) > 1;
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
-            return repetition_score(tt_raw_eval_from_probe(probe));
+            return repetition_score(pos.side_to_move, tt_raw_eval_from_probe(probe));
 
         int tt_score = 0;
         if (tt_cutoff(probe, 0, alpha, beta, ply, tt_score))
@@ -1548,7 +1560,7 @@ struct Searcher {
             return evaluate_search_position(pos);
 
         if (pos.halfmove_clock >= 100)
-            return 0;
+            return draw_score(pos.side_to_move);
 
         alpha = std::max(alpha, -VALUE_MATE + ply);
         beta = std::min(beta, VALUE_MATE - ply - 1);
@@ -1568,7 +1580,7 @@ struct Searcher {
         const bool exclusion_search = !move_is_none(excluded_move);
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
-            return repetition_score(tt_raw_eval_from_probe(probe));
+            return repetition_score(pos.side_to_move, tt_raw_eval_from_probe(probe));
         const Move probed_tt_move = tt_move_from_probe(probe);
         const Move tt_move = exclusion_search ? Move(0) : probed_tt_move;
         const memory::Bound tt_bound = tt_bound_from_probe(probe);
@@ -2300,7 +2312,9 @@ struct Searcher {
 #endif
 
         if (legal_count == 0) {
-            const int score = exclusion_search ? alpha : (checked ? (-VALUE_MATE + ply) : 0);
+            const int score = exclusion_search
+                ? alpha
+                : (checked ? (-VALUE_MATE + ply) : draw_score(pos.side_to_move));
             if (!exclusion_search)
                 save_tt(pos, search_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
             return score;
@@ -2465,7 +2479,7 @@ struct Searcher {
         }
 
         if (result.best_move == 0) {
-            result.score = checked ? -VALUE_MATE : 0;
+            result.score = checked ? -VALUE_MATE : draw_score(root.side_to_move);
             result.best_move = 0;
             result.seldepth = seldepth;
             return result;
@@ -3116,6 +3130,7 @@ std::string move_to_uci(Move m) {
         Move hint_move = 0;
         Position keyed_root = local_root;
         position_refresh_key(keyed_root, searcher.mem.tables);
+        searcher.root_side_to_move = keyed_root.side_to_move;
         const auto search_start = Searcher::clock::now();
         searcher.start_time = search_start;
         u64 total_nodes = 0;

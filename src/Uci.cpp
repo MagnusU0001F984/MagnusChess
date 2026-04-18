@@ -60,6 +60,9 @@ namespace {
 constexpr int DEFAULT_UCI_DEPTH = 8;
 constexpr int DEFAULT_UCI_THREADS = 1;
 constexpr int MAX_UCI_THREADS = 512;
+constexpr int DEFAULT_UCI_CONTEMPT = 0;
+constexpr int MIN_UCI_CONTEMPT = -10000;
+constexpr int MAX_UCI_CONTEMPT = 10000;
 struct PositionHistory {
     Key keys[search::MAX_GAME_HISTORY]{};
     int count = 0;
@@ -583,12 +586,13 @@ void handle_setoption(
     bool& use_nnue,
     bool& enable_ponder,
     int& threads,
+    int& contempt,
     std::string& eval_file,
     std::ostream& out,
     std::string_view command
 ) {
-    // Option parsing is intentionally small: hash size, hash clear, NNUE toggle,
-    // and NNUE file path are all that the engine currently exposes.
+    // Option parsing is intentionally small: hash size, threading, contempt,
+    // search toggles, and NNUE file path are all that the engine exposes.
     std::istringstream iss{std::string(command)};
     std::string token;
     std::string name;
@@ -619,6 +623,15 @@ void handle_setoption(
         int parsed_threads = 0;
         if (parse_int(value, parsed_threads))
             threads = std::clamp(parsed_threads, 1, MAX_UCI_THREADS);
+    }
+    else if (name == "Contempt") {
+        int parsed_contempt = 0;
+        if (parse_int(value, parsed_contempt)) {
+            const int clamped = std::clamp(parsed_contempt, MIN_UCI_CONTEMPT, MAX_UCI_CONTEMPT);
+            if (contempt != clamped)
+                memory::memory_clear_hash(mem);
+            contempt = clamped;
+        }
     }
     else if (name == "Clear Hash") {
         memory::memory_clear_hash(mem);
@@ -813,6 +826,7 @@ struct UciSession {
     bool use_nnue = true;
     bool enable_ponder = true;
     int threads = DEFAULT_UCI_THREADS;
+    int contempt = DEFAULT_UCI_CONTEMPT;
     std::string eval_file = default_eval_file();
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
@@ -882,6 +896,9 @@ struct UciSession {
         out << "id author Magnus\n";
         out << "option name Hash type spin default 64 min 1 max 33554432\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
+        out << "option name Contempt type spin default " << DEFAULT_UCI_CONTEMPT
+            << " min " << MIN_UCI_CONTEMPT
+            << " max " << MAX_UCI_CONTEMPT << "\n";
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
@@ -986,6 +1003,7 @@ struct UciSession {
         ensure_search_eval_ready(out, "info string nnue unavailable, search will use hce");
 
         limits.use_nnue = use_nnue;
+        limits.contempt = contempt;
         limits.stop = &stop_requested;
         limits.pondering = &pondering;
         limits.ponder_time_offset_ms = &ponder_time_offset_ms;
@@ -1101,7 +1119,16 @@ struct UciSession {
         }
 
         if (command_starts_with(line, "setoption")) {
-            handle_setoption(mem, use_nnue, enable_ponder, threads, eval_file, out, line);
+            handle_setoption(
+                mem,
+                use_nnue,
+                enable_ponder,
+                threads,
+                contempt,
+                eval_file,
+                out,
+                line
+            );
             return true;
         }
 
