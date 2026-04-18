@@ -30,6 +30,7 @@ SOFTWARE.
 #include <charconv>
 #include <cctype>
 #include <filesystem>
+#include <limits>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -83,11 +84,11 @@ inline void push_position_history(
 }
 
 [[nodiscard]] constexpr const char* go_usage_hint() noexcept {
-    return "go <depth/movetime/nodes>";
+    return "go <depth/movetime/nodes/ponder>";
 }
 
 [[nodiscard]] constexpr const char* go_usage_examples() noexcept {
-    return "examples: go depth 8 | go movetime 1000 | go nodes 50000 | go wtime 15000 btime 15000";
+    return "examples: go depth 8 | go movetime 1000 | go nodes 50000 | go wtime 15000 btime 15000 | go ponder wtime 15000 btime 15000";
 }
 
 [[nodiscard]] constexpr const char* perft_usage_hint() noexcept {
@@ -117,6 +118,12 @@ inline void push_position_history(
     std::string_view command
 ) noexcept {
     return line.size() > command.size() ? line.substr(command.size() + 1) : std::string_view{};
+}
+
+[[nodiscard]] inline long long steady_now_ms() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()
+    ).count();
 }
 
 [[nodiscard]] std::string default_eval_file() {
@@ -574,6 +581,7 @@ private:
 void handle_setoption(
     memory::Memory& mem,
     bool& use_nnue,
+    bool& enable_ponder,
     int& threads,
     std::string& eval_file,
     std::ostream& out,
@@ -625,6 +633,11 @@ void handle_setoption(
             if (use_nnue && !ensure_nnue_loaded(eval_file, &out))
                 out << "info string nnue unavailable, search will fall back to hce\n";
         }
+    }
+    else if (name == "Ponder") {
+        bool parsed = false;
+        if (parse_bool(value, parsed))
+            enable_ponder = parsed;
     }
     else if (name == "EvalFile") {
         if (!value.empty()) {
@@ -709,6 +722,9 @@ void handle_setoption(
             if (!parse_next_int(params.movestogo))
                 return false;
             has_limit = true;
+        }
+        else if (token == "ponder") {
+            params.ponder = true;
         }
         else if (token == "infinite") {
             params.infinite = true;
@@ -795,10 +811,16 @@ struct UciSession {
     PositionHistory position_history{};
     timeman::TimeManager time_manager{};
     bool use_nnue = true;
+    bool enable_ponder = true;
     int threads = DEFAULT_UCI_THREADS;
     std::string eval_file = default_eval_file();
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
+    std::atomic<bool> ponder_search{false};
+    std::atomic<bool> pondering{false};
+    std::atomic<bool> ponder_hit_received{false};
+    std::atomic<int> ponder_time_offset_ms{0};
+    std::atomic<long long> search_start_ms{0};
     std::thread search_thread;
 
     UciSession() {
@@ -824,22 +846,47 @@ struct UciSession {
         stop_requested.store(true, std::memory_order_release);
         if (search_thread.joinable())
             search_thread.join();
+        ponder_search.store(false, std::memory_order_release);
+        pondering.store(false, std::memory_order_release);
+        ponder_hit_received.store(false, std::memory_order_release);
+        ponder_time_offset_ms.store(0, std::memory_order_release);
+        search_start_ms.store(0, std::memory_order_release);
         search_running.store(false, std::memory_order_release);
     }
 
+    void handle_ponderhit() noexcept {
+        if (!search_running.load(std::memory_order_acquire) ||
+            !ponder_search.load(std::memory_order_acquire) ||
+            !pondering.load(std::memory_order_acquire)) {
+            return;
+        }
+
+        const long long start_ms = search_start_ms.load(std::memory_order_acquire);
+        const long long now_ms = steady_now_ms();
+        const long long elapsed = start_ms > 0 ? std::max(0LL, now_ms - start_ms) : 0LL;
+        const int offset_ms = static_cast<int>(
+            std::min<long long>(elapsed, std::numeric_limits<int>::max())
+        );
+
+        ponder_time_offset_ms.store(offset_ms, std::memory_order_release);
+        ponder_hit_received.store(true, std::memory_order_release);
+        pondering.store(false, std::memory_order_release);
+    }
+
     void emit_banner(std::ostream& out) const {
-        out << "ValerainChess 0.0.8 by the Magnus developer" << std::endl;
+        out << "ValerainChess 0.0.9 by the Magnus developer" << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name ValerainChess 0.0.8\n";
+        out << "id name ValerainChess 0.0.9\n";
         out << "id author Magnus\n";
         out << "option name Hash type spin default 64 min 1 max 33554432\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
+        out << "option name Ponder type check default true\n";
         out << "option name EvalFile type string default " << eval_file << '\n';
-        out << "uciok\n";
+        out << "uciok" << std::endl;
     }
 
     void reset_new_game() {
@@ -912,6 +959,7 @@ struct UciSession {
                 DEFAULT_BENCH_MOVETIME_MS,
                 static_cast<std::size_t>(threads),
                 use_nnue,
+                enable_ponder,
                 out
             ))
             out << "info string bench failed\n";
@@ -939,11 +987,18 @@ struct UciSession {
 
         limits.use_nnue = use_nnue;
         limits.stop = &stop_requested;
+        limits.pondering = &pondering;
+        limits.ponder_time_offset_ms = &ponder_time_offset_ms;
         limits.thread_count = threads;
         limits.thread_id = 0;
         limits.report_info = true;
         copy_history_to_limits(limits);
         stop_requested.store(false, std::memory_order_release);
+        ponder_search.store(limits.ponder, std::memory_order_release);
+        pondering.store(limits.ponder, std::memory_order_release);
+        ponder_hit_received.store(false, std::memory_order_release);
+        ponder_time_offset_ms.store(0, std::memory_order_release);
+        search_start_ms.store(steady_now_ms(), std::memory_order_release);
 
         const Position root = pos;
         search_running.store(true, std::memory_order_release);
@@ -951,16 +1006,26 @@ struct UciSession {
             PvTrackingStreamBuf pv_tracking_buf(std::cout.rdbuf());
             std::ostream tracked_out(&pv_tracking_buf);
             const auto search_start = std::chrono::steady_clock::now();
+            const bool started_as_ponder = limits.ponder;
             const search::SearchResult result =
                 search::iterative_deepening(root, mem, limits, &tracked_out);
             tracked_out.flush();
             const auto search_end = std::chrono::steady_clock::now();
-            const int elapsed_ms = static_cast<int>(
+            const int wall_elapsed_ms = static_cast<int>(
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     search_end - search_start
                 ).count()
             );
-            time_manager.record_search(root, limits, result, elapsed_ms);
+            const bool ponder_was_hit =
+                !started_as_ponder || ponder_hit_received.load(std::memory_order_acquire);
+            const int record_elapsed_ms = started_as_ponder
+                ? std::max(
+                    0,
+                    wall_elapsed_ms - ponder_time_offset_ms.load(std::memory_order_acquire)
+                )
+                : wall_elapsed_ms;
+            if (ponder_was_hit)
+                time_manager.record_search(root, limits, result, record_elapsed_ms);
 
             const std::string ponder = ponder_move_from_last_pv(
                 root,
@@ -970,9 +1035,14 @@ struct UciSession {
             );
 
             std::cout << "bestmove " << search::move_to_uci(result.best_move);
-            if (!ponder.empty())
+            if (enable_ponder && !ponder.empty())
                 std::cout << " ponder " << ponder;
-            std::cout << '\n';
+            std::cout << std::endl;
+            ponder_search.store(false, std::memory_order_release);
+            pondering.store(false, std::memory_order_release);
+            ponder_hit_received.store(false, std::memory_order_release);
+            ponder_time_offset_ms.store(0, std::memory_order_release);
+            search_start_ms.store(0, std::memory_order_release);
             search_running.store(false, std::memory_order_release);
         });
     }
@@ -1010,6 +1080,11 @@ struct UciSession {
             return true;
         }
 
+        if (line == "ponderhit") {
+            handle_ponderhit();
+            return true;
+        }
+
         if (line == "quit") {
             stop_search();
             return false;
@@ -1026,7 +1101,7 @@ struct UciSession {
         }
 
         if (command_starts_with(line, "setoption")) {
-            handle_setoption(mem, use_nnue, threads, eval_file, out, line);
+            handle_setoption(mem, use_nnue, enable_ponder, threads, eval_file, out, line);
             return true;
         }
 

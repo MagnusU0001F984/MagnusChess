@@ -50,6 +50,7 @@ struct SearchLimits {
     u64 node_limit = 0;
     int soft_time_ms = 0;
     int hard_time_ms = 0;
+    bool ponder = false;
     bool infinite = false;
     bool use_nnue = false;
     Key game_history_keys[MAX_GAME_HISTORY]{};
@@ -58,6 +59,8 @@ struct SearchLimits {
     int root_move_count = 0;
     std::atomic<bool>* stop = nullptr;
     const std::atomic<bool>* external_stop = nullptr;
+    const std::atomic<bool>* pondering = nullptr;
+    const std::atomic<int>* ponder_time_offset_ms = nullptr;
     std::atomic<u64>* shared_nodes = nullptr;
     int thread_id = 0;
     int thread_count = 1;

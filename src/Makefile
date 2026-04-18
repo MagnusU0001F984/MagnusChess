@@ -1,5 +1,5 @@
 CXX := g++
-TARGET := valerain
+TARGET := ValerainChess
 
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj

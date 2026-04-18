@@ -500,6 +500,7 @@ bool run_search_bench(
     int depth,
     std::size_t threads,
     bool use_nnue,
+    bool emit_ponder,
     std::ostream& out
 ) {
     u64 total_time_ms = 0;
@@ -538,7 +539,7 @@ bool run_search_bench(
         total_nodes += res.search.nodes;
 
         out << "bestmove " << search::move_to_uci(res.search.best_move);
-        if (!res.ponder.empty())
+        if (emit_ponder && !res.ponder.empty())
             out << " ponder " << res.ponder;
         out << "\n";
         if (i + 1 != SEARCH_BENCH_FENS.size())
@@ -554,6 +555,7 @@ bool run_timed_search_bench(
     int movetime_ms,
     std::size_t threads,
     bool use_nnue,
+    bool emit_ponder,
     std::ostream& out
 ) {
     u64 total_time_ms = 0;
@@ -594,7 +596,7 @@ bool run_timed_search_bench(
         total_nodes += res.search.nodes;
 
         out << "bestmove " << search::move_to_uci(res.search.best_move);
-        if (!res.ponder.empty())
+        if (emit_ponder && !res.ponder.empty())
             out << " ponder " << res.ponder;
         out << "\n";
         if (i + 1 != SEARCH_BENCH_FENS.size())
@@ -672,8 +674,22 @@ int run_bench(int argc, char** argv) {
         }
 
         const bool ok = cfg.timed_search
-            ? run_timed_search_bench(mem, cfg.search_movetime_ms, cfg.threads, use_nnue, std::cout)
-            : run_search_bench(mem, cfg.search_depth, cfg.threads, false, std::cout);
+            ? run_timed_search_bench(
+                mem,
+                cfg.search_movetime_ms,
+                cfg.threads,
+                use_nnue,
+                true,
+                std::cout
+            )
+            : run_search_bench(
+                mem,
+                cfg.search_depth,
+                cfg.threads,
+                false,
+                true,
+                std::cout
+            );
         memory_free(mem);
         return ok ? 0 : 1;
     }

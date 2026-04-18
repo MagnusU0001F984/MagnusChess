@@ -46,6 +46,7 @@ struct GoParams {
     int winc = 0;
     int binc = 0;
     int movestogo = 0;
+    bool ponder = false;
     bool infinite = false;
 };
 
@@ -101,4 +102,3 @@ private:
 };
 
 } // namespace valerain::timeman
-

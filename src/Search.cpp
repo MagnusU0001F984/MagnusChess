@@ -881,6 +881,23 @@ struct Searcher {
         ).count());
     }
 
+    [[nodiscard]] inline bool pondering_active() const noexcept {
+        return limits.pondering != nullptr &&
+               limits.pondering->load(std::memory_order_acquire);
+    }
+
+    [[nodiscard]] inline int timed_elapsed_ms() const noexcept {
+        const int elapsed = elapsed_ms();
+        if (limits.ponder_time_offset_ms == nullptr)
+            return elapsed;
+
+        const int offset = std::max(
+            0,
+            limits.ponder_time_offset_ms->load(std::memory_order_acquire)
+        );
+        return std::max(0, elapsed - offset);
+    }
+
     [[nodiscard]] inline bool hit_hard_limit() noexcept {
         if (stopped)
             return true;
@@ -906,8 +923,9 @@ struct Searcher {
         }
 
         if (!limits.infinite &&
+            !pondering_active() &&
             limits.hard_time_ms > 0 &&
-            elapsed_ms() >= limits.hard_time_ms) {
+            timed_elapsed_ms() >= limits.hard_time_ms) {
             stopped = true;
             hard_stop = true;
             return true;
@@ -928,8 +946,9 @@ struct Searcher {
             return true;
 
         if (!limits.infinite &&
+            !pondering_active() &&
             limits.soft_time_ms > 0 &&
-            elapsed_ms() >= limits.soft_time_ms) {
+            timed_elapsed_ms() >= limits.soft_time_ms) {
             stopped = true;
             return true;
         }

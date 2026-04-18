@@ -57,6 +57,7 @@ bool TimeManager::build_limits(
     limits.node_limit = 0;
     limits.soft_time_ms = 0;
     limits.hard_time_ms = 0;
+    limits.ponder = params.ponder;
     limits.infinite = false;
 
     if (params.depth > 0)

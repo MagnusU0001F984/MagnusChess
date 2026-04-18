@@ -76,6 +76,7 @@ void set_start_position(Position& pos) noexcept;
     int depth,
     std::size_t threads,
     bool use_nnue,
+    bool emit_ponder,
     std::ostream& out
 );
 
@@ -84,6 +85,7 @@ void set_start_position(Position& pos) noexcept;
     int movetime_ms,
     std::size_t threads,
     bool use_nnue,
+    bool emit_ponder,
     std::ostream& out
 );
 
