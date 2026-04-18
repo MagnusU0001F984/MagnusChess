@@ -25,6 +25,7 @@ SOFTWARE.
 #include "Attack.h"
 #include "Bench.h"
 #include "Memory.h"
+#include "MoveGen.h"
 #include "Nnue.h"
 #include "Perft.h"
 #include "Position.h"
@@ -41,6 +42,7 @@ SOFTWARE.
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <streambuf>
 
 namespace valerain {
 
@@ -64,6 +66,7 @@ struct SearchBenchResult {
     search::SearchResult search{};
     u64 time_ms = 0;
     u64 nps = 0;
+    std::string ponder{};
 };
 
 [[nodiscard]] std::string default_eval_file() {
@@ -122,6 +125,150 @@ struct SearchBenchResult {
 
     sq = static_cast<Square>((rank - '1') * 8 + (file - 'a'));
     return true;
+}
+
+class PvTrackingStreamBuf final : public std::streambuf {
+public:
+    explicit PvTrackingStreamBuf(std::streambuf* sink) noexcept
+        : sink_(sink) {}
+
+    ~PvTrackingStreamBuf() override {
+        flush_pending_line();
+    }
+
+    [[nodiscard]] std::string_view last_pv() const noexcept {
+        return last_pv_;
+    }
+
+protected:
+    int overflow(int ch) override {
+        if (ch == traits_type::eof())
+            return sync() == 0 ? traits_type::not_eof(ch) : traits_type::eof();
+
+        const char c = static_cast<char>(ch);
+        append_char(c);
+        if (sink_ == nullptr)
+            return ch;
+
+        const int result = sink_->sputc(c);
+        if (c == '\n')
+            sink_->pubsync();
+        return result;
+    }
+
+    std::streamsize xsputn(
+        const char* s,
+        std::streamsize count
+    ) override {
+        bool saw_newline = false;
+        for (std::streamsize i = 0; i < count; ++i) {
+            append_char(s[i]);
+            saw_newline = saw_newline || s[i] == '\n';
+        }
+
+        if (sink_ == nullptr)
+            return count;
+
+        const std::streamsize written = sink_->sputn(s, count);
+        if (saw_newline)
+            sink_->pubsync();
+        return written;
+    }
+
+    int sync() override {
+        flush_pending_line();
+        return sink_ != nullptr ? sink_->pubsync() : 0;
+    }
+
+private:
+    void append_char(char c) {
+        if (c == '\n') {
+            flush_pending_line();
+            return;
+        }
+
+        if (c != '\r')
+            line_buffer_.push_back(c);
+    }
+
+    void flush_pending_line() {
+        if (line_buffer_.empty())
+            return;
+
+        process_line();
+        line_buffer_.clear();
+    }
+
+    void process_line() {
+        const std::string_view line{line_buffer_};
+        if (line.rfind("info ", 0) != 0)
+            return;
+
+        constexpr std::string_view pv_marker = " pv ";
+        const std::size_t pv_pos = line.find(pv_marker);
+        if (pv_pos == std::string_view::npos)
+            return;
+
+        const std::size_t pv_begin = pv_pos + pv_marker.size();
+        if (pv_begin >= line.size())
+            return;
+
+        last_pv_.assign(line.substr(pv_begin));
+    }
+
+    std::streambuf* sink_ = nullptr;
+    std::string line_buffer_{};
+    std::string last_pv_{};
+};
+
+[[nodiscard]] bool find_uci_move(
+    const Position& pos,
+    const memory::Memory& mem,
+    std::string_view token,
+    Move& move
+) noexcept {
+    MoveList list{};
+    generate_legal(pos, mem, list);
+
+    for (int i = 0; i < list.size; ++i) {
+        if (search::move_to_uci(list.moves[i]) == token) {
+            move = list.moves[i];
+            return true;
+        }
+    }
+
+    return false;
+}
+
+[[nodiscard]] std::string ponder_move_from_last_pv(
+    const Position& root,
+    const memory::Memory& mem,
+    Move best_move,
+    std::string_view last_pv
+) noexcept {
+    if (move_is_none(best_move) || last_pv.empty())
+        return {};
+
+    std::istringstream pv_stream{std::string(last_pv)};
+    std::string best_token;
+    std::string ponder_token;
+    if (!(pv_stream >> best_token >> ponder_token))
+        return {};
+
+    Move pv_best_move = 0;
+    if (!find_uci_move(root, mem, best_token, pv_best_move) ||
+        pv_best_move != best_move) {
+        return {};
+    }
+
+    Position after_best = root;
+    do_move_copy(after_best, best_move, mem.tables);
+
+    Move ponder_move = 0;
+    if (!find_uci_move(after_best, mem, ponder_token, ponder_move))
+        return {};
+
+    return search::move_to_uci(ponder_move);
 }
 
 [[nodiscard]] bool parse_piece_char(
@@ -237,7 +384,21 @@ struct SearchBenchResult {
     memory::memory_clear_hash(mem);
 
     const auto start = clock::now();
-    const search::SearchResult res = search::iterative_deepening(pos, mem, limits, out);
+    SearchBenchResult result;
+    if (out != nullptr) {
+        PvTrackingStreamBuf pv_tracking_buf(out->rdbuf());
+        std::ostream tracked_out(&pv_tracking_buf);
+        result.search = search::iterative_deepening(pos, mem, limits, &tracked_out);
+        tracked_out.flush();
+        result.ponder = ponder_move_from_last_pv(
+            pos,
+            mem,
+            result.search.best_move,
+            pv_tracking_buf.last_pv()
+        );
+    } else {
+        result.search = search::iterative_deepening(pos, mem, limits, nullptr);
+    }
     const auto end = clock::now();
 
     const u64 time_ms = static_cast<u64>(
@@ -245,11 +406,9 @@ struct SearchBenchResult {
     );
     const double seconds = std::chrono::duration<double>(end - start).count();
 
-    SearchBenchResult result;
-    result.search = res;
     result.time_ms = time_ms;
     result.nps = seconds > 0.0
-        ? static_cast<u64>(static_cast<double>(res.nodes) / seconds)
+        ? static_cast<u64>(static_cast<double>(result.search.nodes) / seconds)
         : 0ULL;
     return result;
 }
@@ -378,7 +537,10 @@ bool run_search_bench(
         total_time_ms += res.time_ms;
         total_nodes += res.search.nodes;
 
-        out << "bestmove " << search::move_to_uci(res.search.best_move) << "\n";
+        out << "bestmove " << search::move_to_uci(res.search.best_move);
+        if (!res.ponder.empty())
+            out << " ponder " << res.ponder;
+        out << "\n";
         if (i + 1 != SEARCH_BENCH_FENS.size())
             out << "\n";
     }
@@ -431,7 +593,10 @@ bool run_timed_search_bench(
         total_time_ms += res.time_ms;
         total_nodes += res.search.nodes;
 
-        out << "bestmove " << search::move_to_uci(res.search.best_move) << "\n";
+        out << "bestmove " << search::move_to_uci(res.search.best_move);
+        if (!res.ponder.empty())
+            out << " ponder " << res.ponder;
+        out << "\n";
         if (i + 1 != SEARCH_BENCH_FENS.size())
             out << "\n";
     }
