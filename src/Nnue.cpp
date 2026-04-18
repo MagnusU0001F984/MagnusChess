@@ -86,6 +86,12 @@ constexpr double kWinRateAs[] = {
 constexpr double kWinRateBs[] = {
     83.86794042, -136.06112997, 69.98820887, 47.62901433
 };
+constexpr double kUciWdlAs[] = {
+    4.44037236, -27.44028449, 69.36512228, 175.98749706
+};
+constexpr double kUciWdlBs[] = {
+    -2.09838237, 15.76765588, -39.56299152, 90.47624591
+};
 using CpLookupRow = std::array<i16, kCpLookupMaxRaw + 1>;
 using CpLookupTable = std::array<CpLookupRow, kMaterialBucketCount>;
 
@@ -117,6 +123,37 @@ template<typename T>
 
 [[nodiscard]] inline Color opposite(Color c) noexcept {
     return c == WHITE ? BLACK : WHITE;
+}
+
+[[nodiscard]] inline int game_ply(const Position& pos) noexcept {
+    const int fullmove = std::max(1, pos.fullmove_number);
+    return (fullmove - 1) * 2 + (pos.side_to_move == BLACK ? 1 : 0);
+}
+
+[[nodiscard]] inline WdlTriplet uci_wdl_from_cp(
+    int cp,
+    const Position& pos
+) noexcept {
+    // Our search score is already in displayed UCI cp units, so unlike
+    // Viridithas we feed cp directly into the WDL model's normalized x-axis.
+    const double m = static_cast<double>(std::min(240, game_ply(pos))) / 64.0;
+    const double a =
+        (((kUciWdlAs[0] * m + kUciWdlAs[1]) * m + kUciWdlAs[2]) * m)
+        + kUciWdlAs[3];
+    const double b =
+        (((kUciWdlBs[0] * m + kUciWdlBs[1]) * m + kUciWdlBs[2]) * m)
+        + kUciWdlBs[3];
+
+    const double x = std::clamp(static_cast<double>(cp), -2000.0, 2000.0);
+    const double win = 1.0 / (1.0 + std::exp((a - x) / b));
+    const double loss = 1.0 / (1.0 + std::exp((a + x) / b));
+    const double draw = 1.0 - win - loss;
+
+    return {
+        .win = static_cast<int>(std::round(1000.0 * win)),
+        .draw = static_cast<int>(std::round(1000.0 * draw)),
+        .loss = static_cast<int>(std::round(1000.0 * loss))
+    };
 }
 
 [[nodiscard]] inline Square flip_vertical_sq(Square sq) noexcept {
@@ -662,22 +699,11 @@ int search_score(int v, const Position& pos) noexcept {
 }
 
 int search_score_to_winrate(int score, const Position& pos) noexcept {
-    auto [a, b] = win_rate_params(pos);
-
-    if (std::abs(a) < 1e-9 || std::abs(b) < 1e-9)
-        return score >= 0 ? 1000 : 0;
-
-    const double raw = (static_cast<double>(score) * a) / 100.0;
-    return std::clamp(win_rate_model(static_cast<int>(std::round(raw)), pos), 0, 1000);
+    return search_score_to_wdl(score, pos).win;
 }
 
 WdlTriplet search_score_to_wdl(int score, const Position& pos) noexcept {
-    const int win = search_score_to_winrate(score, pos);
-    return {
-        .win = win,
-        .draw = 0,
-        .loss = 1000 - win
-    };
+    return uci_wdl_from_cp(score, pos);
 }
 
 int search_score_to_cp(int score, const Position& pos) noexcept {
