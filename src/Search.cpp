@@ -211,7 +211,8 @@ struct Searcher {
     struct StaticEvalInfo {
         CorrectionKeys keys{};
         int raw = VALUE_NONE;
-        int corrected = 0;
+        int base = 0;
+        int search = 0;
         int stand_pat = 0;
     };
 
@@ -961,13 +962,32 @@ struct Searcher {
         return limits.use_nnue && nnue::loaded();
     }
 
-    [[nodiscard]] inline int evaluate_position(const Position& pos) const noexcept {
+    [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
         if (use_nnue())
-            return nnue::search_score(nnue::eval(pos), pos);
+            return nnue::eval(pos);
         return eval::evaluate(pos);
     }
 
-    [[nodiscard]] static inline bool tt_eval_available(
+    [[nodiscard]] inline int base_search_eval_from_raw(
+        int raw_eval,
+        const Position& pos
+    ) const noexcept {
+        if (use_nnue())
+            return nnue::search_score(raw_eval, pos);
+        return raw_eval;
+    }
+
+    [[nodiscard]] static inline int shape_internal_search_score(int mixed_eval) noexcept {
+        return mixed_eval;
+    }
+
+    [[nodiscard]] inline int evaluate_search_position(const Position& pos) const noexcept {
+        return shape_internal_search_score(
+            base_search_eval_from_raw(evaluate_raw_position(pos), pos)
+        );
+    }
+
+    [[nodiscard]] static inline bool tt_raw_eval_available(
         const memory::TTProbe& probe
     ) noexcept {
         return probe.hit && probe.data.eval != VALUE_NONE;
@@ -1032,15 +1052,15 @@ struct Searcher {
     inline void update_correction_history(
         Color side,
         const CorrectionKeys& keys,
-        int raw_eval,
+        int base_eval,
         int score,
         int depth
     ) noexcept {
-        if (raw_eval == VALUE_NONE || is_mate_window(score))
+        if (base_eval == VALUE_NONE || is_mate_window(score))
             return;
 
         const int delta = std::clamp(
-            score - raw_eval,
+            score - base_eval,
             -CORRECTION_HISTORY_CLAMP,
             CORRECTION_HISTORY_CLAMP
         );
@@ -1172,10 +1192,10 @@ struct Searcher {
         return probe.hit ? static_cast<Move>(probe.data.move) : Move(0);
     }
 
-    [[nodiscard]] inline int tt_eval_from_probe(
+    [[nodiscard]] inline int tt_raw_eval_from_probe(
         const memory::TTProbe& probe
     ) const noexcept {
-        return tt_eval_available(probe) ? probe.data.eval : VALUE_NONE;
+        return tt_raw_eval_available(probe) ? probe.data.eval : VALUE_NONE;
     }
 
     [[nodiscard]] inline bool tt_cutoff(
@@ -1208,7 +1228,7 @@ struct Searcher {
         int depth,
         int ply,
         int score,
-        int tt_eval,
+        int raw_eval,
         Move best_move,
         int alpha,
         int beta,
@@ -1219,7 +1239,7 @@ struct Searcher {
             pos.key,
             best_move,
             static_cast<i16>(score_to_tt(score, ply)),
-            static_cast<i16>(tt_eval),
+            static_cast<i16>(raw_eval),
             static_cast<i16>(depth),
             bound_from_score(score, alpha, beta),
             pv_node
@@ -1236,13 +1256,19 @@ struct Searcher {
         StaticEvalInfo info{};
         info.keys = correction_keys(pos);
         const Color side = static_cast<Color>(pos.side_to_move);
-        info.raw = tt_eval_available(probe) ? probe.data.eval : evaluate_position(pos);
-        info.corrected = std::clamp(
-            info.raw + correction_value(side, info.keys),
+        info.raw = tt_raw_eval_available(probe) ? probe.data.eval : evaluate_raw_position(pos);
+        info.base = base_search_eval_from_raw(info.raw, pos);
+        const int mixed_eval = std::clamp(
+            info.base + correction_value(side, info.keys),
             -VALUE_INF,
             VALUE_INF
         );
-        info.stand_pat = info.corrected;
+        info.search = std::clamp(
+            shape_internal_search_score(mixed_eval),
+            -VALUE_INF,
+            VALUE_INF
+        );
+        info.stand_pat = info.search;
 
         if (!qsearch_node || checked || !probe.hit)
             return info;
@@ -1362,7 +1388,7 @@ struct Searcher {
             return alpha;
 
         if (ply >= MAX_PLY - 1)
-            return evaluate_position(pos);
+            return evaluate_search_position(pos);
 
         if (pos.halfmove_clock >= 100)
             return 0;
@@ -1376,7 +1402,7 @@ struct Searcher {
         const bool pv_node = (beta - alpha) > 1;
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
-            return repetition_score(tt_eval_from_probe(probe));
+            return repetition_score(tt_raw_eval_from_probe(probe));
 
         int tt_score = 0;
         if (tt_cutoff(probe, 0, alpha, beta, ply, tt_score))
@@ -1386,7 +1412,7 @@ struct Searcher {
         const Move tt_move = tt_move_from_probe(probe);
         const StaticEvalInfo eval_info = resolve_static_eval(pos, probe, ply, checked, true);
         const int raw_eval = eval_info.raw;
-        const int static_eval = eval_info.corrected;
+        const int static_eval = eval_info.search;
         const int stand_pat_eval = eval_info.stand_pat;
         store_static_eval(ply, static_eval);
 
@@ -1500,7 +1526,7 @@ struct Searcher {
             return alpha;
 
         if (ply >= MAX_PLY - 1)
-            return evaluate_position(pos);
+            return evaluate_search_position(pos);
 
         if (pos.halfmove_clock >= 100)
             return 0;
@@ -1523,7 +1549,7 @@ struct Searcher {
         const bool exclusion_search = !move_is_none(excluded_move);
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
-            return repetition_score(tt_eval_from_probe(probe));
+            return repetition_score(tt_raw_eval_from_probe(probe));
         const Move probed_tt_move = tt_move_from_probe(probe);
         const Move tt_move = exclusion_search ? Move(0) : probed_tt_move;
         const memory::Bound tt_bound = tt_bound_from_probe(probe);
@@ -1545,8 +1571,9 @@ struct Searcher {
         const bool checked = in_check(pos);
         const StaticEvalInfo eval_info = resolve_static_eval(pos, probe, ply, checked, false);
         const int raw_eval = eval_info.raw;
-        const int static_eval = eval_info.corrected;
-        const int correction = static_eval - raw_eval;
+        const int base_eval = eval_info.base;
+        const int static_eval = eval_info.search;
+        const int correction = static_eval - base_eval;
         store_static_eval(ply, static_eval);
         const bool improving = !checked && improving_position(ply, static_eval);
         const Color side = static_cast<Color>(pos.side_to_move);
@@ -2301,7 +2328,7 @@ struct Searcher {
             alpha > alpha0 &&
             alpha < beta &&
             !is_mate_window(alpha)) {
-            update_correction_history(side, eval_info.keys, raw_eval, alpha, search_depth);
+            update_correction_history(side, eval_info.keys, base_eval, alpha, search_depth);
         }
 
         if (!exclusion_search)
@@ -2389,6 +2416,7 @@ struct Searcher {
         const bool checked = in_check(root);
         const StaticEvalInfo eval_info = resolve_static_eval(root, probe, 0, checked, false);
         const int raw_eval = eval_info.raw;
+        const int base_eval = eval_info.base;
         const int alpha0 = alpha;
 
         ScoredMoveList scored;
@@ -2434,7 +2462,7 @@ struct Searcher {
             update_correction_history(
                 static_cast<Color>(root.side_to_move),
                 eval_info.keys,
-                raw_eval,
+                base_eval,
                 best_score,
                 depth
             );
@@ -2835,7 +2863,7 @@ void search_root_blocks(Searcher& searcher, RootParallelTask& task) noexcept {
         searcher.update_correction_history(
             static_cast<Color>(root.side_to_move),
             prep.eval_info.keys,
-            prep.eval_info.raw,
+            prep.eval_info.base,
             result.score,
             task.depth
         );
