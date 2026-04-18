@@ -25,6 +25,7 @@ SOFTWARE.
 #include "Time.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "MoveGen.h"
 #include "Nnue.h"
@@ -33,8 +34,18 @@ namespace valerain::timeman {
 
 namespace {
 
-[[nodiscard]] constexpr int clamp_int(int v, int lo, int hi) noexcept {
-    return v < lo ? lo : (v > hi ? hi : v);
+constexpr int kMoveOverheadMs = 10;
+
+[[nodiscard]] inline int game_ply_from_position(const Position& pos) noexcept {
+    const int fullmove = std::max(1, pos.fullmove_number);
+    return std::max(
+        0,
+        (fullmove - 1) * 2 + (pos.side_to_move == BLACK ? 1 : 0)
+    );
+}
+
+[[nodiscard]] inline double safe_log10(double value) noexcept {
+    return std::log10(std::max(1.0, value));
 }
 
 } // namespace
@@ -42,6 +53,7 @@ namespace {
 void TimeManager::new_game() noexcept {
     history_size_ = 0;
     next_index_ = 0;
+    original_time_adjust_ = -1.0;
 }
 
 std::size_t TimeManager::history_size() const noexcept {
@@ -52,13 +64,14 @@ bool TimeManager::build_limits(
     const Position& pos,
     const GoParams& params,
     search::SearchLimits& limits
-) const noexcept {
+) noexcept {
     limits.depth = search::MAX_PLY;
     limits.node_limit = 0;
     limits.soft_time_ms = 0;
     limits.hard_time_ms = 0;
     limits.ponder = params.ponder;
     limits.infinite = false;
+    limits.use_time_management = false;
 
     if (params.depth > 0)
         limits.depth = params.depth;
@@ -77,128 +90,70 @@ bool TimeManager::build_limits(
     const int increment = side == WHITE ? params.winc : params.binc;
 
     if (!limits.infinite && remaining > 0) {
-        const int move_number = std::max(1, pos.fullmove_number);
-        const bool sudden_death = params.movestogo == 0 && increment == 0;
+        limits.use_time_management = true;
+        const int ply = game_ply_from_position(pos);
 
-        const bool opening_very_early = move_number <= 10;
-        const bool opening_early = move_number <= 20;
+        int centi_mtg =
+            params.movestogo > 0 ? std::min(params.movestogo * 100, 5000) : 5051;
+        if (remaining < 1000)
+            centi_mtg = std::max(1, static_cast<int>(remaining * 5.051));
 
-        int phase_scale = 100;
-        if (move_number <= 10)      phase_scale = sudden_death ? 35 : 45;
-        else if (move_number <= 20) phase_scale = sudden_death ? 50 : 60;
-        else if (move_number <= 35) phase_scale = sudden_death ? 75 : 85;
-        else if (move_number <= 50) phase_scale = sudden_death ? 100 : 105;
-        else                        phase_scale = sudden_death ? 115 : 120;
-
-        const HistoryStats stats = collect_stats(side);
-        if (stats.samples > 0) {
-            // 开局只保留“是否经常超预算”的轻量修正，
-            // 不让 score swing / best move flip 把开局时间抬回去。
-            if (stats.avg_usage_pct >= 120)      phase_scale += opening_very_early ? 6 : 12;
-            else if (stats.avg_usage_pct >= 105) phase_scale += opening_very_early ? 4 : 8;
-            else if (stats.avg_usage_pct <= 70)  phase_scale -= opening_very_early ? 8 : 10;
-            else if (stats.avg_usage_pct <= 85)  phase_scale -= opening_very_early ? 4 : 5;
-
-            if (!opening_early) {
-                if (stats.avg_score_swing_cp >= 140)      phase_scale += 12;
-                else if (stats.avg_score_swing_cp >= 90)  phase_scale += 7;
-                else if (stats.avg_score_swing_cp <= 30)  phase_scale -= 3;
-
-                if (stats.best_move_flip_pct >= 70)      phase_scale += 8;
-                else if (stats.best_move_flip_pct <= 30) phase_scale -= 2;
-            }
-        }
-
-        phase_scale = clamp_int(phase_scale, 35, 150);
-
-        const int mtg =
-            params.movestogo > 0 ? params.movestogo :
-            sudden_death
-                ? (move_number <= 10 ? 40 :
-                   move_number <= 20 ? 32 :
-                   move_number <= 35 ? 24 : 18)
-                : (move_number <= 10 ? 30 :
-                   move_number <= 20 ? 26 : 24);
-
-        int reserve_div =
-            sudden_death
-                ? (move_number <= 10 ? 6 :
-                   move_number <= 20 ? 8 :
-                   move_number <= 35 ? 12 : 16)
-                : (opening_very_early ? 10 :
-                   opening_early      ? 12 :
-                   phase_scale <= 75  ? 12 :
-                   phase_scale <= 90  ? 16 : 24);
-
-        if (stats.samples > 0) {
-            if (stats.avg_usage_pct >= 110)
-                reserve_div = std::max(4, reserve_div - (opening_early ? 1 : 2));
-            else if (stats.avg_usage_pct <= 70)
-                reserve_div += opening_early ? 1 : 2;
-        }
-
-        const int reserve_cap =
-            sudden_death
-                ? std::max(50, remaining / 3)
-                : (phase_scale >= 105 ? 140 : 220);
-        const int reserve_floor = sudden_death ? 50 : 10;
-        const int reserve = std::clamp(remaining / std::max(1, reserve_div), reserve_floor, reserve_cap);
-        const int usable = std::max(1, remaining - reserve);
-
-        const int base = usable / std::max(1, mtg);
-
-        int inc_share = 0;
-        if (increment > 0) {
-            if (opening_very_early)      inc_share = increment / 4;
-            else if (opening_early)      inc_share = (increment * 3) / 10;
-            else                         inc_share = (increment * (phase_scale + 20)) / 200;
-        }
-
-        int soft = (base * phase_scale) / 100 + inc_share;
-        soft += usable / std::max(sudden_death ? 160 : 96, mtg * (sudden_death ? 12 : 8));
-
-        int soft_cap =
-            sudden_death
-                ? (phase_scale <= 65 ? usable / 6 :
-                   phase_scale <= 80 ? usable / 5 :
-                   usable / 4)
-                : (phase_scale <= 75 ? usable / 4 :
-                   phase_scale <= 90 ? usable / 3 :
-                   (usable * 2) / 5);
-
-        // 开局更硬的上限，避免后续补偿项把预算再次抬高
-        if (opening_very_early)
-            soft_cap = std::min(soft_cap, sudden_death ? usable / 10 : usable / 8);
-        else if (opening_early)
-            soft_cap = std::min(soft_cap, sudden_death ? usable / 8 : usable / 6);
-
-        soft = std::max(1, std::min(soft, soft_cap));
-
-        int hard = std::min(
-            usable,
-            std::max(
-                soft + base * (sudden_death ? 1 : 2),
-                soft * (sudden_death ? 2 : (phase_scale >= 105 ? 3 : 2))
-            )
+        const int time_left = std::max(
+            1,
+            remaining
+                + (increment * (centi_mtg - 100)
+                   - kMoveOverheadMs * (200 + centi_mtg))
+                    / 100
         );
 
-        // 开局 hard 不允许膨胀太离谱
-        if (opening_very_early)
-            hard = std::min(hard, std::max(soft, soft * 2));
-        else if (opening_early)
-            hard = std::min(hard, std::max(soft, (soft * 5) / 2));
+        double opt_scale = 1.0;
+        double max_scale = 1.0;
 
-        if (!opening_early &&
-            stats.samples > 0 &&
-            stats.avg_score_swing_cp >= 120 &&
-            stats.avg_usage_pct >= 95) {
-            hard = std::max(hard, std::min(usable, soft * 3));
+        if (params.movestogo == 0) {
+            if (original_time_adjust_ < 0.0)
+                original_time_adjust_ = 0.3128 * safe_log10(double(time_left)) - 0.4354;
+
+            const double log_time_in_sec =
+                safe_log10(std::max(1.0, double(remaining)) / 1000.0);
+            const double opt_constant =
+                std::min(0.0032116 + 0.000321123 * log_time_in_sec, 0.00508017);
+            const double max_constant =
+                std::max(3.3977 + 3.03950 * log_time_in_sec, 2.94761);
+
+            opt_scale =
+                std::min(
+                    0.0121431
+                        + std::pow(double(ply) + 2.94693, 0.461073) * opt_constant,
+                    0.213035 * double(remaining) / double(time_left)
+                )
+                * original_time_adjust_;
+            max_scale = std::min(6.67704, max_constant + double(ply) / 11.9847);
+        } else {
+            const double mtg = double(centi_mtg) / 100.0;
+            opt_scale = std::min(
+                (0.88 + double(ply) / 116.4) / mtg,
+                0.88 * double(remaining) / double(time_left)
+            );
+            max_scale = 1.3 + 0.11 * mtg;
         }
 
-        hard = std::max(soft, hard);
+        int optimum = std::max(1, static_cast<int>(opt_scale * double(time_left)));
+        const int maximum_cap = std::max(
+            1,
+            static_cast<int>(0.825179 * double(remaining) - kMoveOverheadMs)
+        );
+        const int scaled_maximum = std::max(
+            1,
+            static_cast<int>(max_scale * double(std::max(1, optimum)))
+        );
+        const int maximum =
+            std::max(1, std::min(maximum_cap, scaled_maximum) - 10);
 
-        limits.soft_time_ms = soft;
-        limits.hard_time_ms = hard;
+        if (params.ponder)
+            optimum += optimum / 4;
+
+        limits.soft_time_ms = optimum;
+        limits.hard_time_ms = maximum;
     }
 
     if (!limits.infinite &&
@@ -218,7 +173,8 @@ void TimeManager::record_search(
     const search::SearchResult& result,
     int elapsed_ms
 ) noexcept {
-    // Only timed searches should influence the historical budget model.
+    // Keep collecting simple search history even though the current budget
+    // model is Stockfish-style and does not directly feed on these samples.
     if (limits.soft_time_ms <= 0 && limits.hard_time_ms <= 0)
         return;
 

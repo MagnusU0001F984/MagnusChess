@@ -60,7 +60,7 @@ public:
         const Position& pos,
         const GoParams& params,
         search::SearchLimits& limits
-    ) const noexcept;
+    ) noexcept;
 
     void record_search(
         const Position& root,
@@ -95,6 +95,7 @@ private:
     std::array<SearchRecord, MAX_HISTORY> history_{};
     std::size_t history_size_ = 0;
     std::size_t next_index_ = 0;
+    double original_time_adjust_ = -1.0;
 
     void push_record(const SearchRecord& record) noexcept;
     [[nodiscard]] HistoryStats collect_stats(Color side) const noexcept;

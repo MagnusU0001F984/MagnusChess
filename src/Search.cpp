@@ -25,9 +25,11 @@ SOFTWARE.
 #include "Search.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -943,18 +945,7 @@ struct Searcher {
     }
 
     [[nodiscard]] inline bool stop_after_completed_depth() noexcept {
-        if (hit_hard_limit())
-            return true;
-
-        if (!limits.infinite &&
-            !pondering_active() &&
-            limits.soft_time_ms > 0 &&
-            timed_elapsed_ms() >= limits.soft_time_ms) {
-            stopped = true;
-            return true;
-        }
-
-        return false;
+        return hit_hard_limit();
     }
 
     [[nodiscard]] bool in_check(const Position& pos) const noexcept {
@@ -2509,6 +2500,88 @@ struct Searcher {
     }
 };
 
+struct IterationTimeState {
+    std::array<int, 4> iter_values{};
+    Move last_best_move = 0;
+    int last_best_move_depth = 0;
+    int last_completed_score = 0;
+    double previous_time_reduction = 1.0;
+    int best_move_changes = 0;
+    int root_legal_count = 0;
+    bool have_last_score = false;
+};
+
+[[nodiscard]] inline bool use_stockfish_style_time_management(
+    const SearchLimits& limits
+) noexcept {
+    return limits.use_time_management &&
+           !limits.infinite &&
+           limits.soft_time_ms > 0 &&
+           limits.hard_time_ms > 0;
+}
+
+[[nodiscard]] bool should_stop_after_iteration(
+    Searcher& searcher,
+    IterationTimeState& time_state,
+    const SearchResult& current,
+    int depth
+) noexcept {
+    const int iter_slot = depth & 3;
+    const int older_score =
+        depth > 4 ? time_state.iter_values[iter_slot] : current.score;
+    const int previous_score =
+        time_state.have_last_score ? time_state.last_completed_score : current.score;
+
+    if (!move_is_none(current.best_move) &&
+        current.best_move != time_state.last_best_move) {
+        if (!move_is_none(time_state.last_best_move))
+            ++time_state.best_move_changes;
+        time_state.last_best_move = current.best_move;
+        time_state.last_best_move_depth = depth;
+    }
+
+    bool should_stop = false;
+    if (use_stockfish_style_time_management(searcher.limits) &&
+        !searcher.pondering_active()) {
+        double falling_eval =
+            (11.85
+             + 2.24 * double(previous_score - current.score)
+             + 0.93 * double(older_score - current.score))
+            / 100.0;
+        falling_eval = std::clamp(falling_eval, 0.57, 1.70);
+
+        constexpr double k = 0.51;
+        const double center = double(time_state.last_best_move_depth) + 12.15;
+        const double time_reduction =
+            0.66 + 0.85 / (0.98 + std::exp(-k * (double(depth) - center)));
+        const double reduction =
+            (1.43 + time_state.previous_time_reduction) / (2.28 * time_reduction);
+        const double best_move_instability =
+            1.02
+            + 2.14 * double(time_state.best_move_changes)
+                / double(std::max(1, depth - 1));
+
+        double total_time =
+            double(searcher.limits.soft_time_ms)
+            * falling_eval
+            * reduction
+            * best_move_instability;
+
+        if (time_state.root_legal_count == 1)
+            total_time = std::min(502.0, total_time);
+
+        const double stop_time =
+            std::min(total_time, double(searcher.limits.hard_time_ms));
+        should_stop = double(searcher.timed_elapsed_ms()) > stop_time;
+        time_state.previous_time_reduction = time_reduction;
+    }
+
+    time_state.iter_values[iter_slot] = current.score;
+    time_state.last_completed_score = current.score;
+    time_state.have_last_score = true;
+    return should_stop;
+}
+
 struct OrderedRootSearch {
     std::vector<Move> ordered_moves;
     memory::TTProbe probe{};
@@ -3136,6 +3209,14 @@ std::string move_to_uci(Move m) {
         u64 total_nodes = 0;
         int cached_hashfull = 0;
         const int max_depth = std::max(1, searcher.limits.depth);
+        IterationTimeState time_state{};
+        if (searcher.limits.root_move_count > 0) {
+            time_state.root_legal_count = searcher.limits.root_move_count;
+        } else {
+            MoveList root_moves{};
+            generate_legal(keyed_root, searcher.mem, root_moves);
+            time_state.root_legal_count = root_moves.size;
+        }
 
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
@@ -3190,6 +3271,10 @@ std::string move_to_uci(Move m) {
                 capture_completed_result(result, best, searcher);
             }
 
+            const bool should_stop_for_time =
+                !stopped_mid_depth &&
+                should_stop_after_iteration(searcher, time_state, best, depth);
+
             if (local_out != nullptr &&
                 searcher.limits.report_info &&
                 !stopped_mid_depth) {
@@ -3213,6 +3298,9 @@ std::string move_to_uci(Move m) {
             }
 
             if (stopped_mid_depth)
+                break;
+
+            if (should_stop_for_time)
                 break;
 
             if (searcher.stop_after_completed_depth())
@@ -3329,6 +3417,14 @@ std::string move_to_uci(Move m) {
         u64 total_nodes = 0;
         int cached_hashfull = 0;
         const int max_depth = std::max(1, searcher.limits.depth);
+        IterationTimeState time_state{};
+        if (searcher.limits.root_move_count > 0) {
+            time_state.root_legal_count = searcher.limits.root_move_count;
+        } else {
+            MoveList root_moves{};
+            generate_legal(keyed_root, searcher.mem, root_moves);
+            time_state.root_legal_count = root_moves.size;
+        }
 
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
@@ -3383,6 +3479,10 @@ std::string move_to_uci(Move m) {
                 capture_completed_result(result, best, searcher);
             }
 
+            const bool should_stop_for_time =
+                !stopped_mid_depth &&
+                should_stop_after_iteration(searcher, time_state, best, depth);
+
             if (local_out != nullptr &&
                 searcher.limits.report_info &&
                 !stopped_mid_depth) {
@@ -3406,6 +3506,9 @@ std::string move_to_uci(Move m) {
             }
 
             if (stopped_mid_depth)
+                break;
+
+            if (should_stop_for_time)
                 break;
 
             if (searcher.stop_after_completed_depth())

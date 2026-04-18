@@ -53,6 +53,7 @@ struct SearchLimits {
     int contempt = 0;
     bool ponder = false;
     bool infinite = false;
+    bool use_time_management = false;
     bool use_nnue = false;
     Key game_history_keys[MAX_GAME_HISTORY]{};
     int game_history_count = 0;
