@@ -414,8 +414,12 @@ GenSpeedResult benchmark_generation(
     r.iterations = iterations;
     r.total_moves = total_moves;
     r.seconds = seconds;
-    r.generations_per_second = seconds > 0.0 ? iterations / seconds : 0.0;
-    r.moves_per_second = seconds > 0.0 ? total_moves / seconds : 0.0;
+    r.generations_per_second = seconds > 0.0
+        ? static_cast<double>(iterations) / seconds
+        : 0.0;
+    r.moves_per_second = seconds > 0.0
+        ? static_cast<double>(total_moves) / seconds
+        : 0.0;
     return r;
 }
 

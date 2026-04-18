@@ -266,17 +266,33 @@ protected:
 
         const char c = static_cast<char>(ch);
         append_char(c);
-        return sink_ != nullptr ? sink_->sputc(c) : ch;
+        if (sink_ == nullptr)
+            return ch;
+
+        const int result = sink_->sputc(c);
+        if (c == '\n')
+            sink_->pubsync();
+        return result;
     }
 
     std::streamsize xsputn(
         const char* s,
         std::streamsize count
     ) override {
+        bool saw_newline = false;
         for (std::streamsize i = 0; i < count; ++i)
+        {
             append_char(s[i]);
+            saw_newline = saw_newline || s[i] == '\n';
+        }
 
-        return sink_ != nullptr ? sink_->sputn(s, count) : count;
+        if (sink_ == nullptr)
+            return count;
+
+        const std::streamsize written = sink_->sputn(s, count);
+        if (saw_newline)
+            sink_->pubsync();
+        return written;
     }
 
     int sync() override {
