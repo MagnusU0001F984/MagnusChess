@@ -99,7 +99,6 @@ constexpr int SINGULAR_DOUBLE_MIN_DEPTH = 12;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH = 4;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH = 8;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
-constexpr int HASHFULL_REPORT_PERIOD = 4;
 constexpr int CORRECTION_HISTORY_SIZE = 16384;
 constexpr int CORRECTION_HISTORY_GRAIN = 16;
 constexpr int CORRECTION_HISTORY_CLAMP = 256;
@@ -116,12 +115,16 @@ constexpr int CORRECTION_WEIGHT_SUM =
 #define VALERAIN_SEARCH_OBS 0
 #endif
 
+#ifndef VALERAIN_SEARCHSTATS_OBS
+#define VALERAIN_SEARCHSTATS_OBS 0
+#endif
+
 #ifndef VALERAIN_ENABLE_PROBCUT
-#define VALERAIN_ENABLE_PROBCUT 0
+#define VALERAIN_ENABLE_PROBCUT 1
 #endif
 
 #ifndef VALERAIN_ENABLE_SMALL_PROBCUT
-#define VALERAIN_ENABLE_SMALL_PROBCUT 0
+#define VALERAIN_ENABLE_SMALL_PROBCUT 1
 #endif
 
 #ifndef VALERAIN_ENABLE_SINGULAR_EXTENSION
@@ -223,6 +226,25 @@ struct Searcher {
         int stand_pat = 0;
     };
 
+#if VALERAIN_SEARCHSTATS_OBS
+    struct SearchStats {
+        u64 root_moves_searched = 0;
+        u64 root_pvs_researches = 0;
+        u64 pvs_full_researches = 0;
+        u64 pvs_full_pv_node = 0;
+        u64 pvs_full_non_pv_node = 0;
+        u64 lmr_researches = 0;
+        u64 lmr_research_quiet = 0;
+        u64 lmr_research_capture = 0;
+        u64 lmr_research_check = 0;
+        u64 lmr_research_r1 = 0;
+        u64 lmr_research_r2 = 0;
+        u64 lmr_research_r3_plus = 0;
+        std::array<u64, MAX_PLY> pvs_full_by_ply{};
+        std::array<u64, MAX_PLY> lmr_by_ply{};
+    };
+#endif
+
     using clock = std::chrono::steady_clock;
 
     memory::Memory& mem;
@@ -248,6 +270,9 @@ struct Searcher {
     bool stopped = false;
     bool hard_stop = false;
     int nmp_min_ply = 0;
+#if VALERAIN_SEARCHSTATS_OBS
+    SearchStats stats{};
+#endif
 
 #if VALERAIN_CAPTURE_OBS
     struct CaptureObservation {
@@ -717,6 +742,16 @@ struct Searcher {
         if (score <= -VALUE_MATE + MAX_PLY)
             return score + ply;
         return score;
+    }
+
+    [[nodiscard]] static inline i16 score_to_tt_i16(int score, int ply) noexcept {
+        return static_cast<i16>(std::clamp(score_to_tt(score, ply), -VALUE_INF, VALUE_INF));
+    }
+
+    [[nodiscard]] static inline i16 raw_eval_to_tt_i16(int raw_eval) noexcept {
+        if (raw_eval == VALUE_NONE)
+            return static_cast<i16>(VALUE_NONE);
+        return static_cast<i16>(std::clamp(raw_eval, -VALUE_INF, VALUE_INF));
     }
 
     [[nodiscard]] static inline memory::Bound bound_from_score(
@@ -1310,8 +1345,8 @@ struct Searcher {
             mem.tt,
             pos.key,
             best_move,
-            static_cast<i16>(score_to_tt(score, ply)),
-            static_cast<i16>(raw_eval),
+            score_to_tt_i16(score, ply),
+            raw_eval_to_tt_i16(raw_eval),
             static_cast<i16>(depth),
             bound_from_score(score, alpha, beta),
             pv_node
@@ -1881,9 +1916,6 @@ struct Searcher {
 #endif
 
 #if VALERAIN_ENABLE_SMALL_PROBCUT
-        // Small ProbCut: zero-cost TT-based cutoff.
-        // If TT already has a high lower-bound entry far above beta,
-        // we can return immediately without generating any moves.
         {
             constexpr int SMALL_PROBCUT_MARGIN = 416;
             const int small_probcut_beta = beta + SMALL_PROBCUT_MARGIN;
@@ -1981,6 +2013,7 @@ struct Searcher {
         int searched_capture_count = 0;
         int simple_capture_count = 0;
         int moves_tried = 0;
+        int best_score = -VALUE_INF;
         bool cutoff = false;
 
         for (;;) {
@@ -2285,7 +2318,7 @@ struct Searcher {
             lmr_move.recapture = is_recapture_move(move, ply);
             lmr_move.promotion = move_is_promotion(move);
             lmr_move.ordering_score = quiet_ordering_score;
-            lmr_move.quiet_history_score = history_score;
+            lmr_move.quiet_history_score = history_score + pawn_hist_score / 2;
             lmr_move.continuation_score = continuation_score;
             lmr_move.countermove_bonus = countermove_bonus;
             lmr_move.capture_history_score = capture_history_score;
@@ -2325,9 +2358,26 @@ struct Searcher {
                     score = -pvs(pos, reduced_depth, -alpha - 1, -alpha, ply + 1, true);
 
                     if (score > alpha) {
+                        const int lmr_best_floor = std::max(best_score, alpha);
                         const int research_depth =
-                            lmr_research_depth(lmr, new_depth, score, alpha, alpha);
+                            lmr_research_depth(lmr, new_depth, score, alpha, lmr_best_floor);
                         if (research_depth > reduced_depth) {
+#if VALERAIN_SEARCHSTATS_OBS
+                            ++stats.lmr_researches;
+                            ++stats.lmr_by_ply[std::min(ply, MAX_PLY - 1)];
+                            if (quiet_move)
+                                ++stats.lmr_research_quiet;
+                            if (capture_move)
+                                ++stats.lmr_research_capture;
+                            if (gives_check)
+                                ++stats.lmr_research_check;
+                            if (lmr.final_reduction <= 1)
+                                ++stats.lmr_research_r1;
+                            else if (lmr.final_reduction == 2)
+                                ++stats.lmr_research_r2;
+                            else
+                                ++stats.lmr_research_r3_plus;
+#endif
                             searched_depth = research_depth;
                             score = -pvs(
                                 pos,
@@ -2348,10 +2398,19 @@ struct Searcher {
                     record_cap_lmr_research(move_see_value, lmr.final_reduction);
 #endif
 
-                if (score > alpha && score < beta)
+                if (score > alpha && score < beta) {
                     // A null-window fail-high inside the PV must be confirmed by
                     // a full-window re-search before the score is trusted.
+#if VALERAIN_SEARCHSTATS_OBS
+                    ++stats.pvs_full_researches;
+                    ++stats.pvs_full_by_ply[std::min(ply, MAX_PLY - 1)];
+                    if (pv_node)
+                        ++stats.pvs_full_pv_node;
+                    else
+                        ++stats.pvs_full_non_pv_node;
+#endif
                     score = -pvs(pos, searched_depth, -beta, -alpha, ply + 1, true);
+                }
             }
 
             unmake_move(pos, move, mem.tables, st);
@@ -2366,6 +2425,9 @@ struct Searcher {
                 searched_capture_see[searched_capture_count] = move_see_value;
                 searched_captures[searched_capture_count++] = move;
             }
+
+            if (score > best_score)
+                best_score = score;
 
             if (score > alpha) {
                 alpha = score;
@@ -2529,8 +2591,12 @@ struct Searcher {
             score = -pvs(local_root, depth - 1, -beta, -alpha, 1, true);
         } else {
             score = -pvs(local_root, depth - 1, -alpha - 1, -alpha, 1, true);
-            if (score > alpha)
+            if (score > alpha) {
+#if VALERAIN_SEARCHSTATS_OBS
+                ++stats.root_pvs_researches;
+#endif
                 score = -pvs(local_root, depth - 1, -beta, -alpha, 1, true);
+            }
         }
 
         unmake_move(local_root, move, mem.tables, st);
@@ -2596,6 +2662,9 @@ struct Searcher {
                 break;
 
             const Move move = pick_next(scored, i);
+#if VALERAIN_SEARCHSTATS_OBS
+            ++stats.root_moves_searched;
+#endif
             const RootMoveResult move_result =
                 search_root_move(root, move, depth, alpha, beta, i == 0);
             const int score = move_result.score;
@@ -2621,11 +2690,6 @@ struct Searcher {
 
         if (best_score == -VALUE_INF)
             best_score = alpha;
-
-        if (pv_length[0] == 0) {
-            pv_table[0][0] = result.best_move;
-            pv_length[0] = 1;
-        }
 
         if (!checked &&
             !is_mate_window(best_score) &&
@@ -2729,6 +2793,105 @@ struct IterationTimeState {
     time_state.have_last_score = true;
     return should_stop;
 }
+
+#if VALERAIN_SEARCHSTATS_OBS
+void emit_searchstat_ply_top(
+    std::ostream& out,
+    const char* label,
+    const std::array<u64, MAX_PLY>& current,
+    const std::array<u64, MAX_PLY>& previous
+) {
+    struct Bucket {
+        int ply = 0;
+        u64 count = 0;
+    };
+
+    std::array<Bucket, 4> top{};
+    for (int ply = 0; ply < MAX_PLY; ++ply) {
+        const u64 count = current[static_cast<std::size_t>(ply)]
+            - previous[static_cast<std::size_t>(ply)];
+        if (count == 0)
+            continue;
+
+        for (int i = 0; i < static_cast<int>(top.size()); ++i) {
+            if (count <= top[static_cast<std::size_t>(i)].count)
+                continue;
+
+            for (int j = static_cast<int>(top.size()) - 1; j > i; --j)
+                top[static_cast<std::size_t>(j)] =
+                    top[static_cast<std::size_t>(j - 1)];
+            top[static_cast<std::size_t>(i)] = Bucket{ply, count};
+            break;
+        }
+    }
+
+    out << ' ' << label;
+    bool any = false;
+    for (const Bucket& bucket : top) {
+        if (bucket.count == 0)
+            continue;
+
+        any = true;
+        out << ' ' << bucket.ply << ':' << bucket.count;
+    }
+    if (!any)
+        out << " none";
+}
+
+void emit_searchstats_line(
+    std::ostream& out,
+    int depth,
+    bool partial,
+    u64 depth_nodes,
+    int aspiration_fail_low,
+    int aspiration_fail_high,
+    const Searcher::SearchStats& before,
+    const Searcher::SearchStats& after
+) {
+    out << "info string searchstats depth " << depth
+        << " partial " << (partial ? 1 : 0)
+        << " depthnodes " << depth_nodes
+        << " aspiration_fail_low " << aspiration_fail_low
+        << " aspiration_fail_high " << aspiration_fail_high
+        << " root_moves_searched "
+        << (after.root_moves_searched - before.root_moves_searched)
+        << " root_pvs_researches "
+        << (after.root_pvs_researches - before.root_pvs_researches)
+        << " pvs_full_researches "
+        << (after.pvs_full_researches - before.pvs_full_researches)
+        << " pvs_pv "
+        << (after.pvs_full_pv_node - before.pvs_full_pv_node)
+        << " pvs_nonpv "
+        << (after.pvs_full_non_pv_node - before.pvs_full_non_pv_node)
+        << " lmr_researches "
+        << (after.lmr_researches - before.lmr_researches)
+        << " lmr_quiet "
+        << (after.lmr_research_quiet - before.lmr_research_quiet)
+        << " lmr_capture "
+        << (after.lmr_research_capture - before.lmr_research_capture)
+        << " lmr_check "
+        << (after.lmr_research_check - before.lmr_research_check)
+        << " lmr_r1 "
+        << (after.lmr_research_r1 - before.lmr_research_r1)
+        << " lmr_r2 "
+        << (after.lmr_research_r2 - before.lmr_research_r2)
+        << " lmr_r3plus "
+        << (after.lmr_research_r3_plus - before.lmr_research_r3_plus);
+    emit_searchstat_ply_top(
+        out,
+        "pvs_by_ply",
+        after.pvs_full_by_ply,
+        before.pvs_full_by_ply
+    );
+    emit_searchstat_ply_top(
+        out,
+        "lmr_by_ply",
+        after.lmr_by_ply,
+        before.lmr_by_ply
+    );
+    out << '\n';
+}
+#endif
 
 struct OrderedRootSearch {
     std::vector<Move> ordered_moves;
@@ -3310,9 +3473,7 @@ std::string move_to_uci(Move m) {
         int pv_length,
         Searcher::clock::time_point search_start,
         u64 nodes,
-        int depth,
-        int max_depth,
-        int& cached_hashfull
+        int depth
     ) {
         const double seconds =
             std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
@@ -3320,18 +3481,14 @@ std::string move_to_uci(Move m) {
             ? static_cast<u64>(static_cast<double>(nodes) / seconds)
             : 0ULL;
         const u64 time_ms = static_cast<u64>(seconds * 1000.0);
-        if (depth == 1 ||
-            depth == max_depth ||
-            (depth % HASHFULL_REPORT_PERIOD) == 0) {
-            cached_hashfull = memory::tt_hashfull(local_mem.tt);
-        }
+        const int hashfull = memory::tt_hashfull(local_mem.tt);
 
         stream << "info depth " << depth
                << " seldepth " << current.seldepth << ' ';
         append_uci_score(stream, current.score, local_root, searcher.use_nnue());
         stream << " nodes " << nodes
                << " nps " << nps
-               << " hashfull " << cached_hashfull
+               << " hashfull " << hashfull
                << " time " << time_ms
                << " pv";
 
@@ -3355,7 +3512,9 @@ std::string move_to_uci(Move m) {
         const auto search_start = Searcher::clock::now();
         searcher.start_time = search_start;
         u64 total_nodes = 0;
-        int cached_hashfull = 0;
+#if VALERAIN_SEARCHSTATS_OBS
+        u64 last_reported_nodes = 0;
+#endif
         const int max_depth = std::max(1, searcher.limits.depth);
         IterationTimeState time_state{};
         if (searcher.limits.root_move_count > 0) {
@@ -3369,11 +3528,16 @@ std::string move_to_uci(Move m) {
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
             u64 depth_nodes = 0;
-            int depth_max_seldepth = 0;
+#if VALERAIN_SEARCHSTATS_OBS
+            int aspiration_fail_low = 0;
+            int aspiration_fail_high = 0;
+            const Searcher::SearchStats stats_before = searcher.stats;
+#endif
 
             int alpha = -VALUE_INF;
             int beta = VALUE_INF;
             int delta = ASPIRATION_DELTA;
+            int depth_max_seldepth = 0;
 
             if (use_root_aspiration(searcher.limits, depth)) {
                 alpha = std::max(-VALUE_INF, best.score - delta);
@@ -3395,6 +3559,9 @@ std::string move_to_uci(Move m) {
                     break;
 
                 if (current.score <= alpha) {
+#if VALERAIN_SEARCHSTATS_OBS
+                    ++aspiration_fail_low;
+#endif
                     alpha = std::max(-VALUE_INF, current.score - delta);
                     beta = std::min(VALUE_INF, current.score + delta);
                     delta *= 2;
@@ -3402,6 +3569,9 @@ std::string move_to_uci(Move m) {
                 }
 
                 if (current.score >= beta) {
+#if VALERAIN_SEARCHSTATS_OBS
+                    ++aspiration_fail_high;
+#endif
                     alpha = std::max(-VALUE_INF, current.score - delta);
                     beta = std::min(VALUE_INF, current.score + delta);
                     delta *= 2;
@@ -3431,6 +3601,13 @@ std::string move_to_uci(Move m) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
+#if VALERAIN_SEARCHSTATS_OBS
+                const u64 reported_depth_nodes =
+                    reported_nodes >= last_reported_nodes
+                        ? reported_nodes - last_reported_nodes
+                        : depth_nodes;
+                last_reported_nodes = reported_nodes;
+#endif
                 emit_iteration_info(
                     *local_out,
                     searcher.mem,
@@ -3441,14 +3618,46 @@ std::string move_to_uci(Move m) {
                     searcher.pv_length[0],
                     search_start,
                     reported_nodes,
-                    depth,
-                    max_depth,
-                    cached_hashfull
+                    depth
                 );
+#if VALERAIN_SEARCHSTATS_OBS
+                emit_searchstats_line(
+                    *local_out,
+                    depth,
+                    false,
+                    reported_depth_nodes,
+                    aspiration_fail_low,
+                    aspiration_fail_high,
+                    stats_before,
+                    searcher.stats
+                );
+#endif
             }
 
-            if (stopped_mid_depth)
+            if (stopped_mid_depth) {
+#if VALERAIN_SEARCHSTATS_OBS
+                if (local_out != nullptr && searcher.limits.report_info) {
+                    const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
+                        ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
+                        : total_nodes;
+                    const u64 reported_depth_nodes =
+                        reported_nodes >= last_reported_nodes
+                            ? reported_nodes - last_reported_nodes
+                            : depth_nodes;
+                    emit_searchstats_line(
+                        *local_out,
+                        depth,
+                        true,
+                        reported_depth_nodes,
+                        aspiration_fail_low,
+                        aspiration_fail_high,
+                        stats_before,
+                        searcher.stats
+                    );
+                }
+#endif
                 break;
+            }
 
             if (should_stop_for_time)
                 break;
@@ -3521,9 +3730,7 @@ std::string move_to_uci(Move m) {
         int pv_length,
         Searcher::clock::time_point search_start,
         u64 nodes,
-        int depth,
-        int max_depth,
-        int& cached_hashfull
+        int depth
     ) {
         const double seconds =
             std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
@@ -3531,18 +3738,14 @@ std::string move_to_uci(Move m) {
             ? static_cast<u64>(static_cast<double>(nodes) / seconds)
             : 0ULL;
         const u64 time_ms = static_cast<u64>(seconds * 1000.0);
-        if (depth == 1 ||
-            depth == max_depth ||
-            (depth % HASHFULL_REPORT_PERIOD) == 0) {
-            cached_hashfull = memory::tt_hashfull(local_mem.tt);
-        }
+        const int hashfull = memory::tt_hashfull(local_mem.tt);
 
         stream << "info depth " << depth
                << " seldepth " << current.seldepth << ' ';
         append_uci_score(stream, current.score, local_root, searcher.use_nnue());
         stream << " nodes " << nodes
                << " nps " << nps
-               << " hashfull " << cached_hashfull
+               << " hashfull " << hashfull
                << " time " << time_ms
                << " pv";
 
@@ -3566,7 +3769,9 @@ std::string move_to_uci(Move m) {
         const auto search_start = Searcher::clock::now();
         searcher.start_time = search_start;
         u64 total_nodes = 0;
-        int cached_hashfull = 0;
+#if VALERAIN_SEARCHSTATS_OBS
+        u64 last_reported_nodes = 0;
+#endif
         const int max_depth = std::max(1, searcher.limits.depth);
         IterationTimeState time_state{};
         if (searcher.limits.root_move_count > 0) {
@@ -3580,11 +3785,16 @@ std::string move_to_uci(Move m) {
         for (int depth = 1; depth <= max_depth; ++depth) {
             SearchResult current{};
             u64 depth_nodes = 0;
-            int depth_max_seldepth = 0;
+#if VALERAIN_SEARCHSTATS_OBS
+            int aspiration_fail_low = 0;
+            int aspiration_fail_high = 0;
+            const Searcher::SearchStats stats_before = searcher.stats;
+#endif
 
             int alpha = -VALUE_INF;
             int beta = VALUE_INF;
             int delta = ASPIRATION_DELTA;
+            int depth_max_seldepth = 0;
 
             if (use_root_aspiration(searcher.limits, depth)) {
                 alpha = std::max(-VALUE_INF, best.score - delta);
@@ -3600,12 +3810,16 @@ std::string move_to_uci(Move m) {
                 current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
                 depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
                 current.seldepth = depth_max_seldepth;
+                searcher.publish_nodes();
                 depth_nodes += current.nodes;
 
                 if (searcher.stopped || depth == 1)
                     break;
 
                 if (current.score <= alpha) {
+#if VALERAIN_SEARCHSTATS_OBS
+                    ++aspiration_fail_low;
+#endif
                     alpha = std::max(-VALUE_INF, current.score - delta);
                     beta = std::min(VALUE_INF, current.score + delta);
                     delta *= 2;
@@ -3613,6 +3827,9 @@ std::string move_to_uci(Move m) {
                 }
 
                 if (current.score >= beta) {
+#if VALERAIN_SEARCHSTATS_OBS
+                    ++aspiration_fail_high;
+#endif
                     alpha = std::max(-VALUE_INF, current.score - delta);
                     beta = std::min(VALUE_INF, current.score + delta);
                     delta *= 2;
@@ -3642,6 +3859,13 @@ std::string move_to_uci(Move m) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
+#if VALERAIN_SEARCHSTATS_OBS
+                const u64 reported_depth_nodes =
+                    reported_nodes >= last_reported_nodes
+                        ? reported_nodes - last_reported_nodes
+                        : depth_nodes;
+                last_reported_nodes = reported_nodes;
+#endif
                 emit_iteration_info(
                     *local_out,
                     searcher.mem,
@@ -3652,14 +3876,46 @@ std::string move_to_uci(Move m) {
                     searcher.pv_length[0],
                     search_start,
                     reported_nodes,
-                    depth,
-                    max_depth,
-                    cached_hashfull
+                    depth
                 );
+#if VALERAIN_SEARCHSTATS_OBS
+                emit_searchstats_line(
+                    *local_out,
+                    depth,
+                    false,
+                    reported_depth_nodes,
+                    aspiration_fail_low,
+                    aspiration_fail_high,
+                    stats_before,
+                    searcher.stats
+                );
+#endif
             }
 
-            if (stopped_mid_depth)
+            if (stopped_mid_depth) {
+#if VALERAIN_SEARCHSTATS_OBS
+                if (local_out != nullptr && searcher.limits.report_info) {
+                    const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
+                        ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
+                        : total_nodes;
+                    const u64 reported_depth_nodes =
+                        reported_nodes >= last_reported_nodes
+                            ? reported_nodes - last_reported_nodes
+                            : depth_nodes;
+                    emit_searchstats_line(
+                        *local_out,
+                        depth,
+                        true,
+                        reported_depth_nodes,
+                        aspiration_fail_low,
+                        aspiration_fail_high,
+                        stats_before,
+                        searcher.stats
+                    );
+                }
+#endif
                 break;
+            }
 
             if (should_stop_for_time)
                 break;
@@ -3668,6 +3924,7 @@ std::string move_to_uci(Move m) {
                 break;
         }
 
+        searcher.publish_nodes();
         result.best.nodes = searcher.limits.shared_nodes != nullptr
             ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
             : total_nodes;
