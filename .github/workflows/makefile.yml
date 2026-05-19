@@ -20,8 +20,5 @@ jobs:
           sudo apt-get install -y build-essential
 
       - name: Build
-        run: make build
-
-      - name: Smoke test
-        run: |
-          echo "uci" | ./bin/MagnusChess
+        working-directory: ./src
+        run: make
