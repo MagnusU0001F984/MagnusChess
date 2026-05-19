@@ -3075,7 +3075,7 @@ void emit_iteration_info(
         ? static_cast<u64>(static_cast<double>(nodes) / seconds)
         : 0ULL;
     const u64 time_ms = static_cast<u64>(seconds * 1000.0);
-    const int hashfull = memory::tt_hashfull(local_mem.tt);
+    const int hashfull = memory::tt_hashfull(local_mem.tt, /*max_age=*/2);
 
     stream << "info depth " << depth
            << " seldepth " << current.seldepth << ' ';
@@ -3414,7 +3414,7 @@ void emit_iteration_info(
             ? static_cast<u64>(static_cast<double>(nodes) / seconds)
             : 0ULL;
         const u64 time_ms = static_cast<u64>(seconds * 1000.0);
-        const int hashfull = memory::tt_hashfull(local_mem.tt);
+        const int hashfull = memory::tt_hashfull(local_mem.tt, /*max_age=*/2);
 
         stream << "info depth " << result.best.depth
                << " seldepth " << result.best.seldepth << ' ';
