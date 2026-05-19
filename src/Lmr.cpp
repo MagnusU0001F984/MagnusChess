@@ -189,7 +189,7 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
     if (node.cut_node)
         fp += FP_ONE_PLY / 2;
     if (node.all_node)
-        fp += fp / (node.depth + 1);
+        fp -= fp / (node.depth + 1);
 
     if (node.tt_move_is_capture && move.quiet)
         fp += FP_ONE_PLY / 8;

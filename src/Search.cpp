@@ -896,19 +896,19 @@ struct Searcher {
 
         control.skip_quiets = true;
         control.keep_top_history = 4;
-        control.quiet_limit = std::max(4, lmp_limit(depth, improving) / 2);
+        control.quiet_limit = std::max(6, lmp_limit(depth, improving) / 2);
 
         if (!improving)
-            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+            control.quiet_limit = std::max(6, control.quiet_limit - 1);
         if (static_eval <= alpha)
-            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+            control.quiet_limit = std::max(6, control.quiet_limit - 1);
         if (node_history_signal < 0)
-            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+            control.quiet_limit = std::max(6, control.quiet_limit - 1);
 
         if (!move_is_none(tt_move) && !move_is_capture(tt_move)) {
             ++control.quiet_limit;
         } else if (!move_is_none(tt_move)) {
-            control.quiet_limit = std::max(3, control.quiet_limit - 1);
+            control.quiet_limit = std::max(6, control.quiet_limit - 1);
         }
 
         control.history_floor = history_prune_threshold(depth, improving) - 64;
@@ -1931,7 +1931,7 @@ struct Searcher {
 #if MAGNUS_SEARCH_OBS
                         ++search_obs.probcut_cutoffs;
 #endif
-                        save_tt(pos, tt_store_depth - 3, ply, score, raw_eval, move, alpha0, beta, pv_node);
+                        save_tt(pos, std::max(0, search_depth - PROBCUT_REDUCTION), ply, score, raw_eval, move, alpha0, beta, pv_node);
                         return score;
                     }
                 }
@@ -2176,7 +2176,7 @@ struct Searcher {
                 const int captured_value = is_ok(captured_pt) ? piece_order_value[captured_pt] : 0;
                 // SPSA-tuned capture futility margin: base intercept + depth slope
                 // + material gain + scaled capture-history signal.
-                const int cap_futility = static_eval + 218 + 223 * search_depth
+                const int cap_futility = static_eval + 192 + 160 * search_depth
                     + captured_value + 131 * capture_history_score / 1024;
                 if (cap_futility <= alpha)
                     continue;
@@ -2228,7 +2228,7 @@ struct Searcher {
                 search_depth <= 6 &&
                 quiet_move &&
                 !ensure_gives_check() &&
-                quiet_count > std::max(2, lmp_limit(search_depth, improving) / 2) &&
+                quiet_count > lmp_limit(search_depth, improving) &&
                 combined_history <= history_prune_threshold(search_depth, improving)) {
                 // History pruning removes quiets that are both late and historically bad.
                 continue;
@@ -2326,7 +2326,7 @@ struct Searcher {
                 // Negative extensions: TT move is not singular.
                 // Only apply in non-PV cut-nodes (LOWER bound), not for PV EXACT.
                 else if (tt_bound == memory::BOUND_LOWER) {
-                    if (probed_tt_score >= beta)
+                    if (!pv_node && probed_tt_score >= beta)
                         move_extension = -3;
                     else if (!pv_node && !move_is_none(tt_move))
                         move_extension = -2;
@@ -2342,8 +2342,6 @@ struct Searcher {
             const int continuation_score = quiet_move
                 ? history_tables.continuation_value_fast(pos, move, prev_move)
                     + history_tables.continuation_value_fast(pos, move, prev2_move) / 2
-                    + history_tables.continuation_value_fast(pos, move, prev3_move) / 4
-                    + history_tables.continuation_value_fast(pos, move, prev4_move) / 4
                 : 0;
             const int pawn_hist_score = quiet_move
                 ? history_tables.pawn_history_value_fast(pos, move) : 0;
@@ -3230,7 +3228,9 @@ void emit_iteration_info(
         }
 
         if (stopped_mid_depth) {
-            if (local_out != nullptr && searcher.limits.report_info) {
+            if (local_out != nullptr &&
+                searcher.limits.report_info &&
+                depth > best.depth + 1) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
