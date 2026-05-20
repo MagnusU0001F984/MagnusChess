@@ -2836,8 +2836,8 @@ struct IterationTimeState {
         const int elapsed = searcher.timed_elapsed_ms();
         const int remaining = searcher.limits.hard_time_ms - elapsed;
         // Only skip the next depth if the remaining budget is less than
-        // 5 % of the current hard limit — i.e. practically zero.
-        if (remaining < searcher.limits.hard_time_ms / 20)
+        // 3 % of the current hard limit — i.e. practically zero.
+        if (remaining < searcher.limits.hard_time_ms / 33)
             should_stop = true;
     }
 
