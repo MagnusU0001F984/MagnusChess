@@ -187,7 +187,8 @@ inline Bitboard pin_mask_for(
     const GenInfo& info,
     Square from
 ) noexcept {
-    // A pinned piece may only move along the line between the king and the pinner.
+    // A pinned piece may only move along the full rank/file/diagonal through
+    // the king and the piece, including squares toward the pinner.
     return (info.pinned & bb_of(from)) ? line_bb(mem, info.king_sq, from) : ~0ULL;
 }
 
@@ -836,7 +837,7 @@ inline bool legal_fast_impl(
     if ((info.pinned & bb_of(from)) == 0ULL)
         return true;
 
-    return legal_slow(pos, mem, m);
+    return (line_bb(mem, info.king_sq, from) & bb_of(to_sq(m))) != 0ULL;
 }
 
 inline Move* generate_non_evasions_with_info(

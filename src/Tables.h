@@ -64,8 +64,8 @@ struct Tables {
     Bitboard knight_attacks[SQ_NB]{};
     Bitboard pawn_attacks[COLOR_NB][SQ_NB]{};
 
-    Bitboard between[SQ_NB][SQ_NB]{};
-    Bitboard line[SQ_NB][SQ_NB]{};
+    Bitboard between[SQ_NB][SQ_NB]{};  // Squares strictly between two aligned squares.
+    Bitboard line[SQ_NB][SQ_NB]{};     // Full rank/file/diagonal through two aligned squares.
 
     u8 chebyshev[SQ_NB][SQ_NB]{};
     u8 manhattan[SQ_NB][SQ_NB]{};
@@ -177,14 +177,24 @@ constexpr Bitboard compute_line(Square a, Square b) noexcept {
 
     const int df = sign_i(file_of(b) - file_of(a));
     const int dr = sign_i(rank_of(b) - rank_of(a));
-    const int step = dr * 8 + df;
 
-    Bitboard mask = bb_of(a);
-    int sq = a;
+    int f = file_of(a);
+    int r = rank_of(a);
+    while (true) {
+        const int prev_f = f - df;
+        const int prev_r = r - dr;
+        if (prev_f < 0 || prev_f >= 8 || prev_r < 0 || prev_r >= 8)
+            break;
+        f = prev_f;
+        r = prev_r;
+    }
 
-    while (sq != b) {
-        sq += step;
+    Bitboard mask = 0ULL;
+    while (f >= 0 && f < 8 && r >= 0 && r < 8) {
+        const Square sq = static_cast<Square>(r * 8 + f);
         mask |= bb_of(sq);
+        f += df;
+        r += dr;
     }
 
     return mask;

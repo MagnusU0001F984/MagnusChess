@@ -1,5 +1,6 @@
 CXX := g++
 TARGET := MagnusChess
+PIN_TEST := MoveGenPinRegression
 
 BUILD_DIR := build
 OBJ_DIR := $(BUILD_DIR)/obj
@@ -29,6 +30,8 @@ SRC := \
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC))
 DEP := $(OBJ:.o=.d)
+PIN_TEST_SRC := ../tools/MoveGenPinRegression.cpp
+PIN_TEST_OBJ := $(OBJ_DIR)/MoveGenPinRegression.o
 
 ARCH_FLAGS := \
 	-m64 \
@@ -128,16 +131,19 @@ else
 endif
 
 OUTPUT := $(BIN_DIR)/$(TARGET)$(EXEEXT)
+PIN_TEST_OUTPUT := $(BIN_DIR)/$(PIN_TEST)$(EXEEXT)
 PROFGEN_OUTPUT := $(BIN_DIR)/$(TARGET)_profgen$(EXEEXT)
 PGO_OUTPUT := $(BIN_DIR)/$(TARGET)_pgo$(EXEEXT)
 
 ifeq ($(OS),Windows_NT)
 	RUN_CMD = .\$(call fixpath,$(OUTPUT))
+	RUN_PIN_TEST_CMD = .\$(call fixpath,$(PIN_TEST_OUTPUT))
 	RUN_PROFGEN_CMD = .\$(call fixpath,$(PROFGEN_OUTPUT))
 	RUN_PGO_CMD = .\$(call fixpath,$(PGO_OUTPUT))
 	PGO_BENCH_LOG_CMD = $(call fixpath,$(PGO_BENCH_LOG))
 else
 	RUN_CMD = ./$(OUTPUT)
+	RUN_PIN_TEST_CMD = ./$(PIN_TEST_OUTPUT)
 	RUN_PROFGEN_CMD = ./$(PROFGEN_OUTPUT)
 	RUN_PGO_CMD = ./$(PGO_OUTPUT)
 	PGO_BENCH_LOG_CMD = $(PGO_BENCH_LOG)
@@ -145,7 +151,7 @@ endif
 
 .PHONY: all build release releases \
 	pgo profile-build pgo-step1 pgo-step2 pgo-step3 \
-	pgo-generate-build pgo-use-build run clean objclean pgo-clean distclean
+	pgo-generate-build pgo-use-build run movegen-pin-test clean objclean pgo-clean distclean
 
 all: build
 build: $(OUTPUT)
@@ -163,6 +169,15 @@ $(PGO_OUTPUT): $(OBJ) | $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
+
+$(PIN_TEST_OBJ): $(PIN_TEST_SRC) | $(OBJ_DIR)
+	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
+
+$(PIN_TEST_OUTPUT): $(filter-out $(OBJ_DIR)/Main.o,$(OBJ)) $(PIN_TEST_OBJ) | $(BIN_DIR)
+	$(CXX) $^ -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
+
+movegen-pin-test: $(PIN_TEST_OUTPUT)
+	$(RUN_PIN_TEST_CMD)
 
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)
@@ -218,6 +233,7 @@ pgo-clean:
 clean:
 	$(call RMDIR_R,$(OBJ_DIR))
 	$(call RM_F,$(OUTPUT))
+	$(call RM_F,$(PIN_TEST_OUTPUT))
 	$(call RM_F,$(PROFGEN_OUTPUT))
 	$(call RM_F,$(PGO_OUTPUT))
 
