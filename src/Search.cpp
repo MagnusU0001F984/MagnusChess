@@ -2827,19 +2827,17 @@ struct IterationTimeState {
 
     // Fixed-time grace: simple depth-boundary stop for go movetime.
     // When the sf-style clock is disabled but a hard limit exists, avoid
-    // launching a new depth iteration that will almost certainly be
-    // interrupted mid-search.  Use the last completed depth's wall time
-    // to project whether the next depth would finish before the hard cap.
+    // launching a new depth with essentially zero remaining budget
+    // (the hard-limit poll will kill it before a single move is searched).
     if (!use_stockfish_style_time_management(searcher.limits) &&
         searcher.limits.hard_time_ms > 0 &&
         !searcher.pondering_active() &&
         time_state.last_depth_time_ms > 0) {
         const int elapsed = searcher.timed_elapsed_ms();
         const int remaining = searcher.limits.hard_time_ms - elapsed;
-        // Conservative estimate: next depth costs 2× the previous one.
-        // Require at least 65 % of that estimate to still be available.
-        const int estimated_next = (time_state.last_depth_time_ms * 2 * 65) / 100;
-        if (remaining < estimated_next)
+        // Only skip the next depth if the remaining budget is less than
+        // 5 % of the current hard limit — i.e. practically zero.
+        if (remaining < searcher.limits.hard_time_ms / 20)
             should_stop = true;
     }
 
