@@ -110,7 +110,6 @@ struct GenInfo {
     Square ep_sq = NO_SQ;
 
     Bitboard occupied = 0ULL;
-    Bitboard empty = 0ULL;
     Bitboard us_occ = 0ULL;
     Bitboard them_occ = 0ULL;
 

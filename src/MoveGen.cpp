@@ -230,7 +230,7 @@ inline Bitboard filter_piece_move_mask(
     Bitboard mask
 ) noexcept {
     if constexpr (Mode == PieceMoveMode::NonEvasions) {
-        return mask & ~info.us_occ;
+        return mask & ~info.us_occ & pin_mask_for(mem, info, from);
     } else if constexpr (Mode == PieceMoveMode::CaptureNonEvasions) {
         return mask & info.them_occ;
     } else if constexpr (Mode == PieceMoveMode::QuietNonEvasions) {
@@ -983,7 +983,6 @@ void init_gen_info(
     info.ep_sq   = pos.ep_sq;
 
     info.occupied = pos.occupied;
-    info.empty    = ~info.occupied;
     info.us_occ   = pos.color_bb[info.us];
     info.them_occ = pos.color_bb[info.them];
 
