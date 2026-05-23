@@ -29,12 +29,14 @@ SOFTWARE.
 #include <chrono>
 #include <charconv>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 #include "Attack.h"
 #include "Bench.h"
@@ -124,6 +126,365 @@ inline void push_position_history(
 
 [[nodiscard]] constexpr const char* bench_usage_hint() noexcept {
     return "bench";
+}
+
+[[nodiscard]] constexpr const char* sort_usage_hint() noexcept {
+    return "sort [depth] [threads] | sort depth N threads M";
+}
+
+constexpr const char* kAnsiReset = "\x1b[0m";
+constexpr const char* kAnsiRed = "\x1b[31m";
+constexpr const char* kAnsiGreen = "\x1b[32m";
+constexpr const char* kAnsiYellow = "\x1b[33m";
+constexpr const char* kAnsiBlue = "\x1b[34m";
+constexpr const char* kAnsiMagenta = "\x1b[35m";
+constexpr const char* kAnsiCyan = "\x1b[36m";
+constexpr const char* kAnsiWhite = "\x1b[37m";
+constexpr const char* kAnsiBold = "\x1b[1m";
+
+[[nodiscard]] std::string debug_separator() {
+    return std::string(88, '-');
+}
+
+[[nodiscard]] std::string color_text(std::string_view text, const char* color) {
+    std::string result{color};
+    result.append(text.data(), text.size());
+    result += kAnsiReset;
+    return result;
+}
+
+[[nodiscard]] std::string debug_marker(bool highlight) {
+    return std::string(highlight ? kAnsiMagenta : kAnsiGreen)
+        + (highlight ? "[*]" : "[-]")
+        + kAnsiReset;
+}
+
+[[nodiscard]] const char* score_color(int score) noexcept {
+    if (score > 0)
+        return kAnsiGreen;
+    if (score < 0)
+        return kAnsiRed;
+    return kAnsiYellow;
+}
+
+[[nodiscard]] const char* move_color(Move move) noexcept {
+    if (move_is_promotion(move))
+        return kAnsiMagenta;
+    if (move_is_capture(move))
+        return kAnsiYellow;
+    if (move_is_castle(move))
+        return kAnsiCyan;
+    return kAnsiWhite;
+}
+
+[[nodiscard]] std::string format_u64_with_commas(u64 value) {
+    std::string digits = std::to_string(value);
+    for (std::ptrdiff_t i = static_cast<std::ptrdiff_t>(digits.size()) - 3; i > 0; i -= 3)
+        digits.insert(static_cast<std::size_t>(i), ",");
+    return digits;
+}
+
+[[nodiscard]] std::string format_fixed_with_commas(double value, int decimals) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(decimals) << value;
+    std::string result = oss.str();
+
+    std::size_t dot = result.find('.');
+    if (dot == std::string::npos)
+        dot = result.size();
+
+    for (std::ptrdiff_t i = static_cast<std::ptrdiff_t>(dot) - 3; i > 0; i -= 3)
+        result.insert(static_cast<std::size_t>(i), ",");
+
+    return result;
+}
+
+[[nodiscard]] std::string format_seconds(double seconds) {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(3) << seconds << " s";
+    return oss.str();
+}
+
+[[nodiscard]] std::string format_knps(u64 nodes, double seconds) {
+    const double knps = seconds > 0.0 ? (static_cast<double>(nodes) / seconds) / 1000.0 : 0.0;
+    return format_fixed_with_commas(knps, 1) + " kN/s";
+}
+
+[[nodiscard]] std::string progress_bar(int completed, int total, int width = 28) {
+    completed = std::clamp(completed, 0, std::max(0, total));
+    const int filled = total > 0 ? (completed * width) / total : width;
+
+    std::string result;
+    result.reserve(static_cast<std::size_t>(width) + 32);
+    result.push_back('[');
+    result += kAnsiGreen;
+    result.append(static_cast<std::size_t>(filled), '#');
+    result += kAnsiReset;
+    result.append(static_cast<std::size_t>(width - filled), '-');
+    result.push_back(']');
+    return result;
+}
+
+void render_sort_progress(
+    std::ostream& out,
+    int completed,
+    int total,
+    std::string_view move,
+    std::string_view score,
+    double elapsed_seconds,
+    bool searching
+) {
+    const int percent = total > 0 ? (completed * 100) / total : 100;
+
+    out << '\r' << "\x1b[2K"
+        << " " << debug_marker(false) << ' '
+        << (searching ? "⏳" : "✅") << ' '
+        << progress_bar(completed, total)
+        << ' ' << std::setw(3) << std::right << percent << "%  "
+        << std::setw(3) << std::right << completed << '/' << std::setw(3) << std::left << total
+        << "  move " << color_text(move, kAnsiWhite);
+
+    if (!score.empty())
+        out << "  score " << score;
+
+    out << "  elapsed " << format_seconds(elapsed_seconds)
+        << std::flush;
+}
+
+[[nodiscard]] const char* side_name(Color color) noexcept {
+    return color == WHITE ? "white" : "black";
+}
+
+[[nodiscard]] char display_piece_char(Piece pc) noexcept {
+    switch (pc) {
+        case W_PAWN:   return 'P';
+        case W_KNIGHT: return 'N';
+        case W_BISHOP: return 'B';
+        case W_ROOK:   return 'R';
+        case W_QUEEN:  return 'Q';
+        case W_KING:   return 'K';
+        case B_PAWN:   return 'p';
+        case B_KNIGHT: return 'n';
+        case B_BISHOP: return 'b';
+        case B_ROOK:   return 'r';
+        case B_QUEEN:  return 'q';
+        case B_KING:   return 'k';
+        default:       return '.';
+    }
+}
+
+[[nodiscard]] std::string display_square(Square sq) {
+    if (!is_ok(sq))
+        return "-";
+
+    std::string result;
+    result.push_back(static_cast<char>('a' + file_of(sq)));
+    result.push_back(static_cast<char>('1' + rank_of(sq)));
+    return result;
+}
+
+[[nodiscard]] std::string display_castling_rights(int rights) {
+    std::string result;
+    if ((rights & WHITE_OO) != 0)
+        result.push_back('K');
+    if ((rights & WHITE_OOO) != 0)
+        result.push_back('Q');
+    if ((rights & BLACK_OO) != 0)
+        result.push_back('k');
+    if ((rights & BLACK_OOO) != 0)
+        result.push_back('q');
+    return result.empty() ? "-" : result;
+}
+
+[[nodiscard]] std::string display_fen(const Position& pos) {
+    std::string fen;
+
+    for (int rank = 7; rank >= 0; --rank) {
+        int empty = 0;
+        for (int file = 0; file < 8; ++file) {
+            const Square sq = rank * 8 + file;
+            const Piece pc = piece_on(pos, sq);
+            if (pc == PIECE_NONE) {
+                ++empty;
+                continue;
+            }
+
+            if (empty != 0) {
+                fen.push_back(static_cast<char>('0' + empty));
+                empty = 0;
+            }
+            fen.push_back(display_piece_char(pc));
+        }
+
+        if (empty != 0)
+            fen.push_back(static_cast<char>('0' + empty));
+        if (rank != 0)
+            fen.push_back('/');
+    }
+
+    fen += pos.side_to_move == WHITE ? " w " : " b ";
+    fen += display_castling_rights(pos.castling_rights);
+    fen.push_back(' ');
+    fen += display_square(pos.ep_sq);
+    fen.push_back(' ');
+    fen += std::to_string(pos.halfmove_clock);
+    fen.push_back(' ');
+    fen += std::to_string(pos.fullmove_number);
+    return fen;
+}
+
+[[nodiscard]] std::string display_key_hex(Key key) {
+    std::ostringstream oss;
+    oss << "0x"
+        << std::uppercase
+        << std::hex
+        << std::setw(16)
+        << std::setfill('0')
+        << key;
+    return oss.str();
+}
+
+void display_position_snapshot(
+    const Position& pos,
+    std::ostream& out,
+    std::string_view changed = {}
+) {
+    if (!changed.empty())
+        out << "changed -> " << changed << '\n';
+    out << "pos -> " << display_fen(pos) << '\n';
+    out << "hash -> " << pos.key << " (" << display_key_hex(pos.key) << ")\n";
+}
+
+void display_position(const Position& pos, std::ostream& out) {
+    out << '\n';
+    for (int rank = 7; rank >= 0; --rank) {
+        out << "  +---+---+---+---+---+---+---+---+\n";
+        out << (rank + 1) << " |";
+        for (int file = 0; file < 8; ++file) {
+            const Square sq = rank * 8 + file;
+            out << ' ' << display_piece_char(piece_on(pos, sq)) << " |";
+        }
+        out << '\n';
+    }
+
+    out << "  +---+---+---+---+---+---+---+---+\n";
+    out << "    a   b   c   d   e   f   g   h\n";
+    out << "Fen: " << display_fen(pos) << '\n';
+}
+
+[[nodiscard]] std::string display_score_text(
+    const Position& root,
+    int score,
+    bool nnue_score
+) {
+    constexpr int DISPLAY_VALUE_MATE = 31000;
+
+    if (score >= DISPLAY_VALUE_MATE - search::MAX_PLY) {
+        const int plies_to_mate = DISPLAY_VALUE_MATE - score;
+        return "mate " + std::to_string((plies_to_mate + 1) / 2);
+    }
+
+    if (score <= -DISPLAY_VALUE_MATE + search::MAX_PLY) {
+        const int plies_to_mate = DISPLAY_VALUE_MATE + score;
+        return "mate -" + std::to_string((plies_to_mate + 1) / 2);
+    }
+
+    const int cp = nnue_score ? nnue::search_score_to_cp(score, root) : score;
+    return "cp " + std::to_string(cp);
+}
+
+[[nodiscard]] std::string display_move_kind(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) {
+    std::string kind;
+    if (move_is_castle(move)) {
+        kind = "🏰 castle";
+    } else if (move_is_ep(move)) {
+        kind = "⚔ ep";
+    } else if (move_is_promotion(move)) {
+        kind = move_is_capture(move) ? "✨ cap-promo" : "✨ promo";
+    } else if (move_is_capture(move)) {
+        kind = "⚔ capture";
+    } else if (move_is_double_push(move)) {
+        kind = "⇈ double";
+    } else {
+        kind = "· quiet";
+    }
+
+    if (move_gives_check(pos, mem, move))
+        kind += " 🎯 check";
+    return kind;
+}
+
+[[nodiscard]] bool parse_sort_command(
+    std::string_view command,
+    int& depth,
+    int& thread_count
+) noexcept {
+    std::istringstream iss{std::string(command)};
+    std::string token;
+
+    depth = DEFAULT_UCI_DEPTH;
+    thread_count = std::clamp(thread_count, 1, MAX_UCI_THREADS);
+    iss >> token; // sort
+
+    bool have_positional_depth = false;
+    bool have_positional_threads = false;
+
+    while (iss >> token) {
+        if (token == "depth") {
+            std::string value;
+            if (!(iss >> value) || !parse_int(value, depth))
+                return false;
+            have_positional_depth = true;
+            continue;
+        }
+
+        if (token == "threads" || token == "thread") {
+            std::string value;
+            if (!(iss >> value) || !parse_int(value, thread_count))
+                return false;
+            have_positional_threads = true;
+            continue;
+        }
+
+        int parsed = 0;
+        if (!parse_int(token, parsed))
+            return false;
+
+        if (!have_positional_depth) {
+            depth = parsed;
+            have_positional_depth = true;
+        } else if (!have_positional_threads) {
+            thread_count = parsed;
+            have_positional_threads = true;
+        } else {
+            return false;
+        }
+    }
+
+    return depth > 0 &&
+           depth <= search::MAX_PLY &&
+           thread_count > 0 &&
+           thread_count <= MAX_UCI_THREADS;
+}
+
+[[nodiscard]] std::string_view trim_ascii(std::string_view text) noexcept {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t'))
+        text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' ||
+                             text.back() == '\r' || text.back() == '\n'))
+        text.remove_suffix(1);
+    return text;
+}
+
+[[nodiscard]] std::string_view arrow_arguments(std::string_view args) noexcept {
+    args = trim_ascii(args);
+    if (args.size() >= 2 && args[0] == '-' && args[1] == '>')
+        args.remove_prefix(2);
+    return trim_ascii(args);
 }
 
 [[nodiscard]] bool command_starts_with(
@@ -502,12 +863,12 @@ struct UciSession {
     }
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 0.1.1 by the Magnus developer" << std::endl;
+        out << "MagnusChess\U0001F984 0.2.71 by the Magnus developer & This is a beta version" << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 0.1.1\n";
-        out << "id author Magnus\n";
+        out << "id name MagnusChess 0.2.71 for Beta Testing\n";
+        out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
         out << "option name Hash type spin default 16 min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
         out << "option name Contempt type spin default " << DEFAULT_UCI_CONTEMPT
@@ -687,6 +1048,227 @@ struct UciSession {
         }
     }
 
+    void handle_movegen(std::ostream& out) {
+        ensure_attack_ready();
+
+        MoveList list{};
+        generate_legal(pos, mem, list);
+
+        out << debug_separator() << '\n';
+        out << " " << debug_marker(true) << ' '
+            << kAnsiBold << kAnsiCyan << "🔎 movegen" << kAnsiReset
+            << "   side: " << side_name(static_cast<Color>(pos.side_to_move))
+            << "   legal: " << list.size
+            << "   backend: " << attack_backend_name() << '\n';
+        out << " " << debug_marker(false) << " fen: " << display_fen(pos) << '\n';
+        out << debug_separator() << '\n';
+        out << " " << debug_marker(true) << " "
+            << std::setw(3) << std::right << "#"
+            << "   "
+            << std::setw(8) << std::left << "Move"
+            << std::setw(6) << std::left << "From"
+            << std::setw(6) << std::left << "To"
+            << "Kind" << '\n';
+        out << debug_separator() << '\n';
+
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            const std::string move_text = search::move_to_uci(move);
+            out << " " << debug_marker(false) << " "
+                << std::setw(3) << std::right << (i + 1)
+                << "   "
+                << move_color(move) << std::setw(8) << std::left << move_text << kAnsiReset
+                << std::setw(6) << std::left << display_square(from_sq(move))
+                << std::setw(6) << std::left << display_square(to_sq(move))
+                << display_move_kind(pos, mem, move)
+                << '\n';
+        }
+        out << debug_separator() << '\n' << std::flush;
+    }
+
+    void handle_sort(std::string_view line, std::ostream& out) {
+        ensure_attack_ready();
+
+        int depth = DEFAULT_UCI_DEPTH;
+        int sort_threads = threads;
+        if (!parse_sort_command(line, depth, sort_threads)) {
+            out << "info string usage: " << sort_usage_hint() << '\n';
+            return;
+        }
+
+        MoveList list{};
+        generate_legal(pos, mem, list);
+        if (list.size == 0) {
+            out << debug_separator() << '\n';
+            out << " " << debug_marker(true) << ' '
+                << kAnsiBold << kAnsiMagenta << "🧠 sort" << kAnsiReset
+                << "   depth: " << depth
+                << "   threads: " << sort_threads
+                << "   legal: 0\n";
+            out << debug_separator() << '\n' << std::flush;
+            return;
+        }
+
+        ensure_search_eval_ready(out, "info string nnue unavailable, sort will use hce");
+        const bool using_nnue_scores = use_nnue && nnue::loaded();
+
+        struct SortEntry {
+            Move move = 0;
+            std::string move_text{};
+            std::string score_text{};
+            std::string pv{};
+            int score = 0;
+            int depth = 0;
+            int seldepth = 0;
+            u64 nodes = 0;
+            double seconds = 0.0;
+        };
+
+        std::vector<SortEntry> entries;
+        entries.reserve(static_cast<std::size_t>(list.size));
+
+        out << debug_separator() << '\n';
+        out << " " << debug_marker(true) << ' '
+            << kAnsiBold << kAnsiMagenta << "🧠 sort" << kAnsiReset
+            << "   depth: " << depth
+            << "   threads: " << sort_threads
+            << "   legal: " << list.size
+            << "   eval: " << active_eval_name(use_nnue)
+            << "   side: " << side_name(static_cast<Color>(pos.side_to_move))
+            << '\n';
+        out << " " << debug_marker(false) << " fen: " << display_fen(pos) << '\n';
+        out << debug_separator() << '\n' << std::flush;
+
+        using clock = std::chrono::steady_clock;
+        const auto total_start = clock::now();
+
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            const std::string move_text = search::move_to_uci(move);
+
+            render_sort_progress(
+                out,
+                i,
+                list.size,
+                move_text,
+                std::string_view{},
+                std::chrono::duration<double>(clock::now() - total_start).count(),
+                true
+            );
+
+            search::SearchLimits limits{};
+            limits.depth = depth;
+            limits.use_nnue = use_nnue;
+            limits.contempt = contempt;
+            limits.thread_count = sort_threads;
+            limits.thread_id = 0;
+            limits.report_info = true;
+            limits.root_moves[0] = move;
+            limits.root_move_count = 1;
+            copy_history_to_limits(limits);
+
+            std::atomic<bool> local_stop{false};
+            limits.stop = &local_stop;
+
+            PvTrackingStreamBuf pv_tracking_buf(nullptr);
+            std::ostream tracked_out(&pv_tracking_buf);
+            const auto move_start = clock::now();
+            const search::SearchResult result =
+                search::iterative_deepening(pos, mem, limits, &tracked_out);
+            const auto move_end = clock::now();
+            tracked_out.flush();
+            const double seconds = std::chrono::duration<double>(move_end - move_start).count();
+
+            std::string pv{pv_tracking_buf.last_pv()};
+            if (pv.empty())
+                pv = move_text;
+
+            const std::string score_text =
+                display_score_text(pos, result.score, using_nnue_scores);
+
+            entries.push_back({
+                move,
+                move_text,
+                score_text,
+                pv,
+                result.score,
+                result.depth,
+                result.seldepth,
+                result.nodes,
+                seconds
+            });
+
+            const std::string colored_score = color_text(score_text, score_color(result.score));
+            render_sort_progress(
+                out,
+                i + 1,
+                list.size,
+                move_text,
+                colored_score,
+                std::chrono::duration<double>(clock::now() - total_start).count(),
+                false
+            );
+        }
+        out << '\n';
+
+        std::stable_sort(
+            entries.begin(),
+            entries.end(),
+            [](const SortEntry& lhs, const SortEntry& rhs) noexcept {
+                if (lhs.score != rhs.score)
+                    return lhs.score > rhs.score;
+                return lhs.move_text < rhs.move_text;
+            }
+        );
+
+        const double total_seconds =
+            std::chrono::duration<double>(clock::now() - total_start).count();
+        u64 total_nodes = 0;
+        for (const SortEntry& entry : entries)
+            total_nodes += entry.nodes;
+
+        out << debug_separator() << '\n';
+        out << " " << debug_marker(true) << ' '
+            << kAnsiBold << kAnsiMagenta << "🏁 sorted root moves" << kAnsiReset
+            << "   depth: " << depth
+            << "   threads: " << sort_threads
+            << "   moves: " << entries.size()
+            << "   nodes: " << format_u64_with_commas(total_nodes)
+            << "   time: " << format_seconds(total_seconds)
+            << "   nps: " << format_knps(total_nodes, total_seconds)
+            << '\n';
+        out << debug_separator() << '\n';
+        out << " " << debug_marker(true) << " "
+            << std::setw(3) << std::right << "#"
+            << "   "
+            << std::setw(8) << std::left << "Move"
+            << std::setw(11) << std::left << "Score"
+            << std::setw(7) << std::right << "Depth"
+            << std::setw(8) << std::right << "Sel"
+            << std::setw(13) << std::right << "Nodes"
+            << std::setw(11) << std::right << "Time"
+            << "  PV" << '\n';
+        out << debug_separator() << '\n';
+
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const SortEntry& entry = entries[i];
+            out << " " << debug_marker(false) << " "
+                << std::setw(3) << std::right << (i + 1)
+                << "   "
+                << move_color(entry.move)
+                << std::setw(8) << std::left << entry.move_text << kAnsiReset
+                << score_color(entry.score) << std::setw(11) << std::left
+                << entry.score_text << kAnsiReset
+                << std::setw(7) << std::right << entry.depth
+                << std::setw(8) << std::right << entry.seldepth
+                << std::setw(13) << std::right << format_u64_with_commas(entry.nodes)
+                << std::setw(11) << std::right << format_seconds(entry.seconds)
+                << "  " << color_text(entry.pv, kAnsiBlue)
+                << '\n';
+        }
+        out << debug_separator() << '\n' << std::flush;
+    }
+
     void handle_bench(std::string_view line, std::ostream& out) {
         ensure_attack_ready();
         if (line != "bench") {
@@ -714,8 +1296,36 @@ struct UciSession {
                 mem,
                 command_arguments(line, "position"),
                 position_history
-            ))
+            )) {
             out << "info string invalid position command\n";
+            return;
+        }
+
+        display_position_snapshot(pos, out, "position");
+    }
+
+    void handle_fen_shortcut(
+        std::string_view line,
+        std::string_view command,
+        std::ostream& out
+    ) {
+        std::string_view fen = arrow_arguments(command_arguments(line, command));
+        if (fen.empty()) {
+            if (command == "fen")
+                out << "fen -> " << display_fen(pos) << '\n';
+            else
+                display_position_snapshot(pos, out);
+            return;
+        }
+
+        if (!parse_fen(pos, mem, fen)) {
+            out << "invalid -> " << command << '\n';
+            out << "usage -> " << command << " [->] <fen>\n";
+            return;
+        }
+
+        clear_position_history(position_history);
+        display_position_snapshot(pos, out, command);
     }
 
     void handle_go(std::string_view line, std::ostream& out) {
@@ -843,6 +1453,7 @@ struct UciSession {
 
         if (line == "ucinewgame") {
             reset_new_game();
+            display_position_snapshot(pos, out, "newgame");
             return true;
         }
 
@@ -853,6 +1464,39 @@ struct UciSession {
 
         if (line == "eval") {
             handle_eval(out);
+            return true;
+        }
+
+        if (line == "d") {
+            display_position(pos, out);
+            return true;
+        }
+
+        if (command_starts_with(line, "pos")) {
+            handle_fen_shortcut(line, "pos", out);
+            return true;
+        }
+
+        if (command_starts_with(line, "fen")) {
+            handle_fen_shortcut(line, "fen", out);
+            return true;
+        }
+
+        if (command_starts_with(line, "hash") || command_starts_with(line, "key")) {
+            const std::string_view command = command_starts_with(line, "hash") ? "hash" : "key";
+            if (!arrow_arguments(command_arguments(line, command)).empty())
+                out << "readonly -> hash is derived from the current position\n";
+            out << "hash -> " << pos.key << " (" << display_key_hex(pos.key) << ")\n";
+            return true;
+        }
+
+        if (line == "movegen") {
+            handle_movegen(out);
+            return true;
+        }
+
+        if (command_starts_with(line, "sort")) {
+            handle_sort(line, out);
             return true;
         }
 

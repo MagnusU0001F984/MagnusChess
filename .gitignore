@@ -22,3 +22,4 @@ Thumbs.db
 # Binaries and local settings
 src/bin/MagnusChess
 src/bin/.claude/
+.deepseek/

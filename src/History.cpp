@@ -25,7 +25,6 @@ SOFTWARE.
 #include "History.h"
 
 #include <algorithm>
-#include <cstring>
 
 /* ===== 繁體中文註釋 =====
  * 本檔案是 MagnusChess 西洋棋引擎的一部分。
@@ -74,7 +73,7 @@ int history_bonus(int depth) noexcept {
 }
 
 int history_penalty(int depth) noexcept {
-    return history_bonus(depth) * 2;
+    return history_bonus(depth) * 3;
 }
 
 int see_immediate_term(int see_value, SeeScalePreset preset) noexcept {

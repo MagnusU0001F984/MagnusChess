@@ -116,6 +116,7 @@ constexpr int PROBCUT_MIN_DEPTH = 5;
 constexpr int PROBCUT_MARGIN = 224;
 constexpr int PROBCUT_REDUCTION = 5;
 constexpr int PROBCUT_TT_DEPTH_MARGIN = 3;
+
 constexpr int SINGULAR_MIN_DEPTH = 8;
 constexpr int SINGULAR_TT_DEPTH_MARGIN = 3;
 constexpr int SINGULAR_MARGIN_BASE = 24;
@@ -126,6 +127,7 @@ constexpr int SINGULAR_DOUBLE_MIN_DEPTH = 12;
 constexpr int SINGULAR_TRIPLE_MARGIN_BASE = 72;
 constexpr int SINGULAR_TRIPLE_MARGIN_PER_DEPTH = 12;
 constexpr int SINGULAR_TRIPLE_MIN_DEPTH = 18;
+
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH = 4;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH = 8;
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
