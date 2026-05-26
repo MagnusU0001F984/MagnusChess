@@ -938,12 +938,25 @@ struct UciSession {
         pondering.store(false, std::memory_order_release);
     }
 
+    const bool is_beta = true;
+
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 0.3.75 by the Magnus developer & This is a beta version" << std::endl;
+        out << "MagnusChess\U0001F984 1.3.75 by the Magnus developer ";
+        if (is_beta) {
+            out << "& This is a beta version";
+        }
+        out << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 0.3.75 for Beta Testing\n";
+        out << "id name MagnusChess 1.3.75 ";
+        
+        if(is_beta) {
+            out << "for Beta Testing";
+        }
+        
+        out << '\n';
+
         out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
         out << "option name Hash type spin default 16 min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
