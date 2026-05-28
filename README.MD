@@ -2,6 +2,18 @@
 
 MagnusChess🦄 is a C++20 chess engine with UCI support, a classical search core, optional NNUE evaluation, and built-in bench / perft / divide tooling for validation, debugging, and performance checks. 🚀
 
+![C++20][cpp20-badge]
+![UCI][uci-badge]
+![NNUE optional][nnue-badge]
+![LGBTQ+ friendly][lgbtqp-badge]
+![trans rights][trans-rights-badge]
+
+[cpp20-badge]: https://img.shields.io/badge/C%2B%2B-20-blue
+[uci-badge]: https://img.shields.io/badge/UCI-supported-brightgreen
+[nnue-badge]: https://img.shields.io/badge/NNUE-optional-purple
+[lgbtqp-badge]: https://img.shields.io/badge/LGBTQ%2B-friendly-ff69b4
+[trans-rights-badge]: https://img.shields.io/badge/trans-rights-5BCEFA
+
 ---
 
 ## Technical Overview 🧠⚙️
