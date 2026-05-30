@@ -53,8 +53,7 @@ constexpr const char* kAnsiRed = "\x1b[31m";
 constexpr const char* kAnsiGreen = "\x1b[32m";
 constexpr const char* kAnsiReset = "\x1b[0m";
 
-NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth) {
-    // Classical reference perft: generate legal moves, copy-make, recurse.
+NodeCount perft_serial_mut(Position& pos, const memory::Memory& mem, int depth) {
     if (depth <= 0) return 1;
 
     MoveList list{};
@@ -66,12 +65,18 @@ NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth
     NodeCount nodes = 0;
 
     for (int i = 0; i < list.size; ++i) {
-        Position next = pos;
-        do_move_copy(next, list.moves[i]);
-        nodes += perft_serial(next, mem, depth - 1);
+        StateInfo st{};
+        make_move(pos, list.moves[i], mem.tables, st);
+        nodes += perft_serial_mut(pos, mem, depth - 1);
+        unmake_move(pos, list.moves[i], mem.tables, st);
     }
 
     return nodes;
+}
+
+NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth) {
+    Position work = pos;
+    return perft_serial_mut(work, mem, depth);
 }
 
 struct PerftTask {
@@ -235,17 +240,20 @@ PerftDivideResult compute_divide_result(const Position& pos,
         render_divide_table_header(os);
     }
 
+    Position work = pos;
     for (int i = 0; i < list.size; ++i) {
         const Move m = list.moves[i];
-        Position next = pos;
-        do_move_copy(next, m);
+        StateInfo st{};
+        make_move(work, m, mem.tables, st);
 
         const auto start = clock::now();
         const NodeCount child = (depth <= 1)
             ? 1
-            : (threads > 1 ? perft_mt(next, mem, depth - 1, threads)
-                           : perft(next, mem, depth - 1));
+            : (threads > 1 ? perft_mt(work, mem, depth - 1, threads)
+                           : perft_serial_mut(work, mem, depth - 1));
         const auto end = clock::now();
+
+        unmake_move(work, m, mem.tables, st);
 
         const double seconds = std::chrono::duration<double>(end - start).count();
         const double knps = seconds > 0.0 ? (static_cast<double>(child) / seconds) / 1000.0 : 0.0;
@@ -292,10 +300,12 @@ void expand_frontier_once(
             continue;
         }
 
+        Position work = task.pos;
         for (int i = 0; i < list.size; ++i) {
-            Position next = task.pos;
-            do_move_copy(next, list.moves[i]);
-            out.push_back(PerftTask{next, task.depth - 1});
+            StateInfo st{};
+            make_move(work, list.moves[i], mem.tables, st);
+            out.push_back(PerftTask{work, task.depth - 1});
+            unmake_move(work, list.moves[i], mem.tables, st);
         }
     }
 }
@@ -367,7 +377,8 @@ NodeCount perft_mt(
                 if (i >= frontier.size())
                     break;
 
-                local += perft_serial(frontier[i].pos, mem, frontier[i].depth);
+                Position work = frontier[i].pos;
+                local += perft_serial_mut(work, mem, frontier[i].depth);
             }
 
             partial[tid] = local;

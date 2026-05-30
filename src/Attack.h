@@ -157,6 +157,8 @@ const SliderAttackEntry& bishop_slider_entry(int sq) noexcept;
 const SliderAttackEntry& rook_slider_entry(int sq) noexcept;
 std::size_t bishop_slider_table_size() noexcept;
 std::size_t rook_slider_table_size() noexcept;
+const AttackBitboard* bishop_slider_table_data() noexcept;
+const AttackBitboard* rook_slider_table_data() noexcept;
 
 AttackBitboard bishop_attacks(
     const memory::Memory& mem,
@@ -169,6 +171,27 @@ AttackBitboard rook_attacks(
     int sq,
     AttackBitboard occupied
 ) noexcept;
+
+AttackBitboard bishop_attacks_fast(
+    const memory::Memory& mem,
+    int sq,
+    AttackBitboard occupied
+) noexcept;
+
+AttackBitboard rook_attacks_fast(
+    const memory::Memory& mem,
+    int sq,
+    AttackBitboard occupied
+) noexcept;
+
+inline AttackBitboard queen_attacks_fast(
+    const memory::Memory& mem,
+    int sq,
+    AttackBitboard occupied
+) noexcept {
+    return bishop_attacks_fast(mem, sq, occupied)
+         | rook_attacks_fast(mem, sq, occupied);
+}
 
 inline AttackBitboard queen_attacks(
     const memory::Memory& mem,

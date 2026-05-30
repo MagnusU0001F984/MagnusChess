@@ -413,6 +413,14 @@ std::size_t rook_slider_table_size() noexcept {
     return g_rook_table.size();
 }
 
+const AttackBitboard* bishop_slider_table_data() noexcept {
+    return g_bishop_table.data();
+}
+
+const AttackBitboard* rook_slider_table_data() noexcept {
+    return g_rook_table.data();
+}
+
 AttackBitboard bishop_attacks(
     const memory::Memory& mem,
     int sq,
@@ -427,6 +435,44 @@ AttackBitboard rook_attacks(
     AttackBitboard occupied
 ) noexcept {
     return g_attack_backend.rook(mem, sq, occupied);
+}
+
+AttackBitboard bishop_attacks_fast(
+    const memory::Memory& mem,
+    int sq,
+    AttackBitboard occupied
+) noexcept {
+    if (g_attack_backend.kind == AttackBackendKind::PEXT) {
+#if MAGNUS_CAN_COMPILE_PEXT
+        return bishop_attacks_pext(mem, sq, occupied);
+#else
+        return bishop_attacks_table(mem, sq, occupied);
+#endif
+    }
+
+    if (g_attack_backend.kind == AttackBackendKind::TABLE)
+        return bishop_attacks_table(mem, sq, occupied);
+
+    return bishop_attacks_classical(mem, sq, occupied);
+}
+
+AttackBitboard rook_attacks_fast(
+    const memory::Memory& mem,
+    int sq,
+    AttackBitboard occupied
+) noexcept {
+    if (g_attack_backend.kind == AttackBackendKind::PEXT) {
+#if MAGNUS_CAN_COMPILE_PEXT
+        return rook_attacks_pext(mem, sq, occupied);
+#else
+        return rook_attacks_table(mem, sq, occupied);
+#endif
+    }
+
+    if (g_attack_backend.kind == AttackBackendKind::TABLE)
+        return rook_attacks_table(mem, sq, occupied);
+
+    return rook_attacks_classical(mem, sq, occupied);
 }
 
 AttackBitboard bishop_rays(int sq) noexcept {

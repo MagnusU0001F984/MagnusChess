@@ -468,8 +468,8 @@ template<class Layout>
 
 template<class Layout>
 [[nodiscard]] inline int feature_index(
-    const Position& pos,
     Color perspective,
+    int bucket,
     Piece pc,
     Square sq
 ) noexcept {
@@ -478,11 +478,25 @@ template<class Layout>
     if (pt_idx < 0)
         return -1;
 
-    const int bucket = input_bucket<Layout>(pos, perspective);
     const int rel_color = color_of(pc) == perspective ? 0 : 1;
     const int rel_sq = static_cast<int>(relative_square(perspective, sq));
 
     return (((bucket * 2 + rel_color) * 5 + pt_idx) * 64 + rel_sq);
+}
+
+template<class Layout>
+[[nodiscard]] inline int feature_index(
+    const Position& pos,
+    Color perspective,
+    Piece pc,
+    Square sq
+) noexcept {
+    return feature_index<Layout>(
+        perspective,
+        input_bucket<Layout>(pos, perspective),
+        pc,
+        sq
+    );
 }
 
 template<class Layout>
@@ -664,55 +678,89 @@ void rebuild_accumulator(
     return _mm256_cvtepi32_epi64(v);
 }
 
-[[nodiscard]] i64 dot_screlu_i16_i32_avx2(
-    const i16* acc,
-    const i16* weights,
+[[nodiscard]] i64 dot_pair_screlu_i16_i32_avx2(
+    const i16* acc0,
+    const i16* weights0,
+    const i16* acc1,
+    const i16* weights1,
     int count
 ) noexcept {
     const __m256i zero16 = _mm256_setzero_si256();
     const __m256i clip16 = _mm256_set1_epi16(static_cast<i16>(kClip));
-    __m256i sum32 = _mm256_setzero_si256();
+    __m256i sum0_32 = _mm256_setzero_si256();
+    __m256i sum1_32 = _mm256_setzero_si256();
 
     int i = 0;
     for (; i + 15 < count; i += 16) {
-        const __m256i acc16_raw = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(acc + i)
+        const __m256i acc0_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc0 + i)
         );
-        const __m256i w16_raw = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(weights + i)
+        const __m256i w0_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights0 + i)
+        );
+        const __m256i acc1_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(acc1 + i)
+        );
+        const __m256i w1_16_raw = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(weights1 + i)
         );
 
-        const __m256i clipped16 = _mm256_min_epi16(
-            _mm256_max_epi16(acc16_raw, zero16),
+        const __m256i clipped0_16 = _mm256_min_epi16(
+            _mm256_max_epi16(acc0_16_raw, zero16),
+            clip16
+        );
+        const __m256i clipped1_16 = _mm256_min_epi16(
+            _mm256_max_epi16(acc1_16_raw, zero16),
             clip16
         );
 
-        const __m128i acc_lo16 = _mm256_castsi256_si128(clipped16);
-        const __m128i acc_hi16 = _mm256_extracti128_si256(clipped16, 1);
-        const __m128i w_lo16 = _mm256_castsi256_si128(w16_raw);
-        const __m128i w_hi16 = _mm256_extracti128_si256(w16_raw, 1);
+        const __m128i acc0_lo16 = _mm256_castsi256_si128(clipped0_16);
+        const __m128i acc0_hi16 = _mm256_extracti128_si256(clipped0_16, 1);
+        const __m128i w0_lo16 = _mm256_castsi256_si128(w0_16_raw);
+        const __m128i w0_hi16 = _mm256_extracti128_si256(w0_16_raw, 1);
+        const __m128i acc1_lo16 = _mm256_castsi256_si128(clipped1_16);
+        const __m128i acc1_hi16 = _mm256_extracti128_si256(clipped1_16, 1);
+        const __m128i w1_lo16 = _mm256_castsi256_si128(w1_16_raw);
+        const __m128i w1_hi16 = _mm256_extracti128_si256(w1_16_raw, 1);
 
-        const __m256i acc_lo32 = _mm256_cvtepi16_epi32(acc_lo16);
-        const __m256i acc_hi32 = _mm256_cvtepi16_epi32(acc_hi16);
-        const __m256i w_lo32 = _mm256_cvtepi16_epi32(w_lo16);
-        const __m256i w_hi32 = _mm256_cvtepi16_epi32(w_hi16);
+        const __m256i acc0_lo32 = _mm256_cvtepi16_epi32(acc0_lo16);
+        const __m256i acc0_hi32 = _mm256_cvtepi16_epi32(acc0_hi16);
+        const __m256i w0_lo32 = _mm256_cvtepi16_epi32(w0_lo16);
+        const __m256i w0_hi32 = _mm256_cvtepi16_epi32(w0_hi16);
+        const __m256i acc1_lo32 = _mm256_cvtepi16_epi32(acc1_lo16);
+        const __m256i acc1_hi32 = _mm256_cvtepi16_epi32(acc1_hi16);
+        const __m256i w1_lo32 = _mm256_cvtepi16_epi32(w1_lo16);
+        const __m256i w1_hi32 = _mm256_cvtepi16_epi32(w1_hi16);
 
-        const __m256i sq_lo32 = _mm256_mullo_epi32(acc_lo32, acc_lo32);
-        const __m256i sq_hi32 = _mm256_mullo_epi32(acc_hi32, acc_hi32);
+        const __m256i sq0_lo32 = _mm256_mullo_epi32(acc0_lo32, acc0_lo32);
+        const __m256i sq0_hi32 = _mm256_mullo_epi32(acc0_hi32, acc0_hi32);
+        const __m256i sq1_lo32 = _mm256_mullo_epi32(acc1_lo32, acc1_lo32);
+        const __m256i sq1_hi32 = _mm256_mullo_epi32(acc1_hi32, acc1_hi32);
 
-        sum32 = _mm256_add_epi32(
-            sum32,
-            _mm256_mullo_epi32(sq_lo32, w_lo32)
+        sum0_32 = _mm256_add_epi32(
+            sum0_32,
+            _mm256_mullo_epi32(sq0_lo32, w0_lo32)
         );
-        sum32 = _mm256_add_epi32(
-            sum32,
-            _mm256_mullo_epi32(sq_hi32, w_hi32)
+        sum0_32 = _mm256_add_epi32(
+            sum0_32,
+            _mm256_mullo_epi32(sq0_hi32, w0_hi32)
+        );
+        sum1_32 = _mm256_add_epi32(
+            sum1_32,
+            _mm256_mullo_epi32(sq1_lo32, w1_lo32)
+        );
+        sum1_32 = _mm256_add_epi32(
+            sum1_32,
+            _mm256_mullo_epi32(sq1_hi32, w1_hi32)
         );
     }
 
-    i64 total = horizontal_sum_epi32_to_i64_avx2(sum32);
-    for (; i < count; ++i)
-        total += static_cast<i64>(screlu(acc[i])) * static_cast<i64>(weights[i]);
+    i64 total = horizontal_sum_epi32_to_i64_avx2(sum0_32)
+        + horizontal_sum_epi32_to_i64_avx2(sum1_32);
+    for (; i < count; ++i) {
+        total += static_cast<i64>(screlu(acc0[i])) * static_cast<i64>(weights0[i]);
+        total += static_cast<i64>(screlu(acc1[i])) * static_cast<i64>(weights1[i]);
+    }
 
     return total;
 }
@@ -797,8 +845,13 @@ template<class Layout>
     i64 output = 0;
 #if defined(__AVX2__)
     if (net.forward_i32_safe) {
-        output += dot_screlu_i16_i32_avx2(stm_acc.data(), w_stm, Layout::HiddenSize);
-        output += dot_screlu_i16_i32_avx2(nstm_acc.data(), w_nstm, Layout::HiddenSize);
+        output += dot_pair_screlu_i16_i32_avx2(
+            stm_acc.data(),
+            w_stm,
+            nstm_acc.data(),
+            w_nstm,
+            Layout::HiddenSize
+        );
     } else {
         output += dot_screlu_i16_avx2(stm_acc.data(), w_stm, Layout::HiddenSize);
         output += dot_screlu_i16_avx2(nstm_acc.data(), w_nstm, Layout::HiddenSize);
@@ -933,7 +986,8 @@ void apply_p2_piece_delta(
         if (!p2_accumulator_matches(pos, perspective))
             continue;
 
-        const int idx = feature_index<P2Layout>(pos, perspective, pc, sq);
+        const int bucket = input_bucket<P2Layout>(pos, perspective);
+        const int idx = feature_index<P2Layout>(perspective, bucket, pc, sq);
         if (idx < 0)
             continue;
 
@@ -968,8 +1022,9 @@ void apply_p2_piece_move_delta(
         if (!p2_accumulator_matches(pos, perspective))
             continue;
 
-        const int sub_idx = feature_index<P2Layout>(pos, perspective, pc, from);
-        const int add_idx = feature_index<P2Layout>(pos, perspective, pc, to);
+        const int bucket = input_bucket<P2Layout>(pos, perspective);
+        const int sub_idx = feature_index<P2Layout>(perspective, bucket, pc, from);
+        const int add_idx = feature_index<P2Layout>(perspective, bucket, pc, to);
 
         if (sub_idx >= 0 && add_idx >= 0) {
             move_feature<P2Layout>(pos.mnue_p2_acc[persp], g_p2, add_idx, sub_idx);
@@ -1104,7 +1159,7 @@ void debug_dump_p2_features(const Position& pos, std::ostream& out) {
             if (pc == PIECE_NONE)
                 continue;
 
-            const int idx = feature_index<P2Layout>(pos, perspective, pc, sq);
+            const int idx = feature_index<P2Layout>(perspective, bucket, pc, sq);
             if (idx < 0)
                 continue;
 
