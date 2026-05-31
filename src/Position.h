@@ -65,6 +65,7 @@ struct Position {
     Bitboard occupied = 0ULL;
     std::array<std::array<u8, PIECE_NB>, COLOR_NB> piece_counts{};
     u8 non_king_material = 0;
+    u8 mnue_phase_units = 0;
     Key material_signature = 0ULL;
 
     int eval_mg[COLOR_NB]{};
@@ -130,6 +131,10 @@ inline int non_king_material(const Position& pos) noexcept {
     return static_cast<int>(pos.non_king_material);
 }
 
+inline int mnue_phase_units(const Position& pos) noexcept {
+    return static_cast<int>(pos.mnue_phase_units);
+}
+
 inline Key packed_material_signature(const Position& pos) noexcept {
     return pos.material_signature;
 }
@@ -165,6 +170,7 @@ inline bool occupied_on(const Position& pos, Square sq) noexcept {
 }
 
 void position_clear(Position& pos) noexcept;
+void position_copy_without_accumulators(Position& dst, const Position& src) noexcept;
 void position_recompute_occupied(Position& pos) noexcept;
 void position_refresh_king_squares(Position& pos) noexcept;
 [[nodiscard]] Key position_compute_key(const Position& pos, const Tables& tables) noexcept;

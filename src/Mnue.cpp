@@ -205,16 +205,23 @@ inline void invalidate_p2_accumulator(Position& pos) noexcept {
     return pos.mnue_p2_generation == g_p2_generation.load(std::memory_order_relaxed);
 }
 
-inline void sync_p2_generation(const Position& pos) noexcept {
-    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
-    if (pos.mnue_p2_generation != current) {
-        pos.mnue_p2_generation = current;
+[[nodiscard]] inline bool p2_generation_matches(
+    const Position& pos,
+    u32 current_generation
+) noexcept {
+    return pos.mnue_p2_generation == current_generation;
+}
+
+inline void sync_p2_generation(const Position& pos, u32 current_generation) noexcept {
+    if (pos.mnue_p2_generation != current_generation) {
+        pos.mnue_p2_generation = current_generation;
         pos.mnue_p2_acc_valid_mask = 0;
     }
 }
 
 inline void invalidate_p2_perspective(Position& pos, Color perspective) noexcept {
-    sync_p2_generation(pos);
+    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
+    sync_p2_generation(pos, current);
     pos.mnue_p2_acc_valid_mask = static_cast<std::uint8_t>(
         pos.mnue_p2_acc_valid_mask & ~p2_perspective_mask(perspective)
     );
@@ -222,9 +229,10 @@ inline void invalidate_p2_perspective(Position& pos, Color perspective) noexcept
 
 [[nodiscard]] inline bool p2_accumulator_matches(
     const Position& pos,
-    Color perspective
+    Color perspective,
+    u32 current_generation
 ) noexcept {
-    return p2_generation_matches(pos)
+    return p2_generation_matches(pos, current_generation)
         && ((pos.mnue_p2_acc_valid_mask & p2_perspective_mask(perspective)) != 0);
 }
 
@@ -325,10 +333,8 @@ template<class Layout>
 }
 
 [[nodiscard]] inline Square king_square_of(const Position& pos, Color color) noexcept {
-    const Bitboard bb = pieces(pos, color, KING);
-    if (bb == 0)
-        return static_cast<Square>(0);
-    return static_cast<Square>(std::countr_zero(static_cast<std::uint64_t>(bb)));
+    const Square sq = king_square(pos, color);
+    return sq == NO_SQ ? static_cast<Square>(0) : sq;
 }
 
 [[nodiscard]] inline int nonking_piece_index(PieceType pt) noexcept {
@@ -366,13 +372,7 @@ template<class Layout>
     // Therefore:
     //   phase 0 = opening/middlegame
     //   phase 1 = simplified/endgame
-    const int npm =
-        piece_count(pos, WHITE, KNIGHT) + piece_count(pos, BLACK, KNIGHT) +
-        piece_count(pos, WHITE, BISHOP) + piece_count(pos, BLACK, BISHOP) +
-        2 * (piece_count(pos, WHITE, ROOK) + piece_count(pos, BLACK, ROOK)) +
-        4 * (piece_count(pos, WHITE, QUEEN) + piece_count(pos, BLACK, QUEEN));
-
-    return npm < 10 ? 1 : 0;
+    return mnue_phase_units(pos) < 10 ? 1 : 0;
 }
 
 [[nodiscard]] inline int game_ply(const Position& pos) noexcept {
@@ -633,6 +633,7 @@ void rebuild_accumulator(
     const Network<Layout>& net
 ) noexcept {
     std::copy(net.b0.begin(), net.b0.end(), acc.begin());
+    const int bucket = input_bucket<Layout>(pos, perspective);
 
     Bitboard bb = pieces(pos);
     while (bb) {
@@ -645,7 +646,7 @@ void rebuild_accumulator(
         if (pc == PIECE_NONE)
             continue;
 
-        const int idx = feature_index<Layout>(pos, perspective, pc, sq);
+        const int idx = feature_index<Layout>(perspective, bucket, pc, sq);
         if (idx >= 0)
             add_feature(acc, net, idx);
     }
@@ -929,7 +930,8 @@ void rebuild_p2_accumulator(const Position& pos, Color perspective) noexcept {
     if (!g_p2.loaded || !g_p2.valid())
         return;
 
-    sync_p2_generation(pos);
+    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
+    sync_p2_generation(pos, current);
     rebuild_accumulator<P2Layout>(
         pos,
         perspective,
@@ -942,14 +944,12 @@ void rebuild_p2_accumulator(const Position& pos, Color perspective) noexcept {
     );
 }
 
-inline void ensure_p2_accumulator(const Position& pos, Color perspective) noexcept {
-    if (!p2_accumulator_matches(pos, perspective))
-        rebuild_p2_accumulator(pos, perspective);
-}
-
 inline void ensure_p2_accumulators(const Position& pos) noexcept {
-    ensure_p2_accumulator(pos, WHITE);
-    ensure_p2_accumulator(pos, BLACK);
+    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
+    if (!p2_accumulator_matches(pos, WHITE, current))
+        rebuild_p2_accumulator(pos, WHITE);
+    if (!p2_accumulator_matches(pos, BLACK, current))
+        rebuild_p2_accumulator(pos, BLACK);
 }
 
 [[nodiscard]] int eval_p2_incremental(const Position& pos) noexcept {
@@ -972,7 +972,8 @@ void apply_p2_piece_delta(
     Square sq,
     int delta
 ) noexcept {
-    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos))
+    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
+    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos, current))
         return;
 
     if (piece_type == KING) {
@@ -983,7 +984,7 @@ void apply_p2_piece_delta(
     const Piece pc = make_piece(color, piece_type);
     for (int persp = WHITE; persp <= BLACK; ++persp) {
         const Color perspective = static_cast<Color>(persp);
-        if (!p2_accumulator_matches(pos, perspective))
+        if (!p2_accumulator_matches(pos, perspective, current))
             continue;
 
         const int bucket = input_bucket<P2Layout>(pos, perspective);
@@ -1005,7 +1006,8 @@ void apply_p2_piece_move_delta(
     Square from,
     Square to
 ) noexcept {
-    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos))
+    const u32 current = g_p2_generation.load(std::memory_order_relaxed);
+    if (!g_p2.loaded || !g_p2.valid() || !p2_generation_matches(pos, current))
         return;
 
     if (piece_type == KING) {
@@ -1019,7 +1021,7 @@ void apply_p2_piece_move_delta(
     const Piece pc = make_piece(color, piece_type);
     for (int persp = WHITE; persp <= BLACK; ++persp) {
         const Color perspective = static_cast<Color>(persp);
-        if (!p2_accumulator_matches(pos, perspective))
+        if (!p2_accumulator_matches(pos, perspective, current))
             continue;
 
         const int bucket = input_bucket<P2Layout>(pos, perspective);

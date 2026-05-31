@@ -51,6 +51,9 @@ constexpr int kMaterialPiecesPerColor = 5;
 constexpr u8 kNonKingMaterialWeight[PIECE_NB] = {
     1, 3, 3, 5, 9, 0
 };
+constexpr u8 kMnuePhaseWeight[PIECE_NB] = {
+    0, 1, 1, 2, 4, 0
+};
 
 [[nodiscard]] inline bool tracks_material(PieceType piece_type) noexcept {
     return piece_type >= PAWN && piece_type <= QUEEN;
@@ -91,6 +94,9 @@ inline void add_piece_to_caches(
     pos.non_king_material = static_cast<u8>(
         non_king_material(pos) + static_cast<int>(kNonKingMaterialWeight[piece_type])
     );
+    pos.mnue_phase_units = static_cast<u8>(
+        mnue_phase_units(pos) + static_cast<int>(kMnuePhaseWeight[piece_type])
+    );
     refresh_material_signature(pos, color, piece_type);
 }
 
@@ -108,6 +114,9 @@ inline void remove_piece_from_caches(
 
     pos.non_king_material = static_cast<u8>(
         non_king_material(pos) - static_cast<int>(kNonKingMaterialWeight[piece_type])
+    );
+    pos.mnue_phase_units = static_cast<u8>(
+        mnue_phase_units(pos) - static_cast<int>(kMnuePhaseWeight[piece_type])
     );
     refresh_material_signature(pos, color, piece_type);
 }
@@ -222,6 +231,7 @@ void position_clear(Position& pos) noexcept {
 
     pos.occupied = 0ULL;
     pos.non_king_material = 0;
+    pos.mnue_phase_units = 0;
     pos.material_signature = 0ULL;
     pos.eval_mg[WHITE] = 0;
     pos.eval_mg[BLACK] = 0;
@@ -244,6 +254,39 @@ void position_clear(Position& pos) noexcept {
 
     nnue::on_position_cleared(pos);
     mnue::on_position_cleared(pos);
+}
+
+void position_copy_without_accumulators(Position& dst, const Position& src) noexcept {
+    dst.side_to_move = src.side_to_move;
+    dst.ep_sq = src.ep_sq;
+    dst.castling_rights = src.castling_rights;
+    dst.halfmove_clock = src.halfmove_clock;
+    dst.fullmove_number = src.fullmove_number;
+
+    dst.king_sq[WHITE] = src.king_sq[WHITE];
+    dst.king_sq[BLACK] = src.king_sq[BLACK];
+    dst.color_bb[WHITE] = src.color_bb[WHITE];
+    dst.color_bb[BLACK] = src.color_bb[BLACK];
+    for (int pt = 0; pt < PIECE_NB; ++pt)
+        dst.piece_bb[pt] = src.piece_bb[pt];
+    dst.occupied = src.occupied;
+    dst.piece_counts = src.piece_counts;
+    dst.non_king_material = src.non_king_material;
+    dst.mnue_phase_units = src.mnue_phase_units;
+    dst.material_signature = src.material_signature;
+    dst.eval_mg[WHITE] = src.eval_mg[WHITE];
+    dst.eval_mg[BLACK] = src.eval_mg[BLACK];
+    dst.eval_eg[WHITE] = src.eval_eg[WHITE];
+    dst.eval_eg[BLACK] = src.eval_eg[BLACK];
+    dst.eval_phase = src.eval_phase;
+    dst.key = src.key;
+    for (int sq = 0; sq < SQ_NB; ++sq)
+        dst.board[sq] = src.board[sq];
+
+    dst.nnue_generation = 0;
+    dst.nnue_acc_valid = false;
+    dst.mnue_p2_generation = 0;
+    dst.mnue_p2_acc_valid_mask = 0;
 }
 
 void position_recompute_occupied(Position& pos) noexcept {
@@ -391,6 +434,7 @@ bool position_board_matches_bitboards(const Position& pos) noexcept {
     }
 
     int expected_non_king_material = 0;
+    int expected_mnue_phase_units = 0;
     Key expected_material_signature = 0ULL;
     for (int color = WHITE; color <= BLACK; ++color) {
         const Color piece_color = static_cast<Color>(color);
@@ -405,6 +449,9 @@ bool position_board_matches_bitboards(const Position& pos) noexcept {
             expected_non_king_material +=
                 static_cast<int>(piece_counts[piece_color][pt])
                 * static_cast<int>(kNonKingMaterialWeight[pt]);
+            expected_mnue_phase_units +=
+                static_cast<int>(piece_counts[piece_color][pt])
+                * static_cast<int>(kMnuePhaseWeight[pt]);
             expected_material_signature |=
                 static_cast<Key>(piece_counts[piece_color][pt])
                 << material_shift(piece_color, pt);
@@ -421,6 +468,7 @@ bool position_board_matches_bitboards(const Position& pos) noexcept {
            piece_occ[KING]   == pos.piece_bb[KING] &&
            (pos.color_bb[WHITE] | pos.color_bb[BLACK]) == pos.occupied &&
            expected_non_king_material == non_king_material(pos) &&
+           expected_mnue_phase_units == mnue_phase_units(pos) &&
            expected_material_signature == packed_material_signature(pos);
 }
 

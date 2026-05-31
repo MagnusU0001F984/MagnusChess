@@ -75,7 +75,8 @@ NodeCount perft_serial_mut(Position& pos, const memory::Memory& mem, int depth) 
 }
 
 NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth) {
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
     return perft_serial_mut(work, mem, depth);
 }
 
@@ -83,6 +84,12 @@ struct PerftTask {
     Position pos;
     int depth;
 };
+
+void push_light_task(std::vector<PerftTask>& out, const Position& pos, int depth) {
+    PerftTask& task = out.emplace_back();
+    position_copy_without_accumulators(task.pos, pos);
+    task.depth = depth;
+}
 
 struct PerftDivideResult {
     std::vector<PerftDivideRow> rows;
@@ -240,7 +247,8 @@ PerftDivideResult compute_divide_result(const Position& pos,
         render_divide_table_header(os);
     }
 
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
     for (int i = 0; i < list.size; ++i) {
         const Move m = list.moves[i];
         StateInfo st{};
@@ -300,11 +308,12 @@ void expand_frontier_once(
             continue;
         }
 
-        Position work = task.pos;
+        Position work{};
+        position_copy_without_accumulators(work, task.pos);
         for (int i = 0; i < list.size; ++i) {
             StateInfo st{};
             make_move(work, list.moves[i], mem.tables, st);
-            out.push_back(PerftTask{work, task.depth - 1});
+            push_light_task(out, work, task.depth - 1);
             unmake_move(work, list.moves[i], mem.tables, st);
         }
     }
@@ -344,7 +353,7 @@ NodeCount perft_mt(
     NodeCount finished_nodes = 0;
     std::vector<PerftTask> frontier;
     std::vector<PerftTask> next_frontier;
-    frontier.push_back(PerftTask{pos, depth});
+    push_light_task(frontier, pos, depth);
 
     int split_ply = 0;
     while (split_ply < max_split_ply && frontier.size() < target_tasks) {
@@ -377,7 +386,8 @@ NodeCount perft_mt(
                 if (i >= frontier.size())
                     break;
 
-                Position work = frontier[i].pos;
+                Position work{};
+                position_copy_without_accumulators(work, frontier[i].pos);
                 local += perft_serial_mut(work, mem, frontier[i].depth);
             }
 

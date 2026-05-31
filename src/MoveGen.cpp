@@ -1659,7 +1659,8 @@ bool legal(
     const memory::Memory& mem,
     Move m
 ) noexcept {
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
     return legal(work, mem, m);
 }
 
@@ -1812,7 +1813,8 @@ bool move_gives_check(
         ((rook_attacks_fast(mem, enemy_king, occupied) & rook_like) != 0ULL);
 
 #if MAGNUS_VERIFY_GIVES_CHECK
-    Position next = pos;
+    Position next{};
+    position_copy_without_accumulators(next, pos);
     do_move_copy(next, m, mem.tables);
     const bool slow_gives_check =
         checkers_bb(next, mem, static_cast<Color>(next.side_to_move)) != 0ULL;
@@ -1854,7 +1856,8 @@ Move* generate_captures(
     const memory::Memory& mem,
     Move* out
 ) noexcept {
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
     return generate_captures(work, mem, out);
 }
 
@@ -1868,7 +1871,8 @@ Move* generate_quiets(
 
     Move* end = generate_pseudo_quiets(pos, mem, info, out);
     Move* write = out;
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
 
     for (Move* cur = out; cur != end; ++cur) {
         if (needs_legal_filter(work, info, *cur) &&
@@ -2004,7 +2008,8 @@ Move* generate_legal(
     const memory::Memory& mem,
     Move* out
 ) noexcept {
-    Position work = pos;
+    Position work{};
+    position_copy_without_accumulators(work, pos);
     return generate_legal(work, mem, out);
 }
 

@@ -263,7 +263,8 @@ private:
         return {};
     }
 
-    Position after_best = root;
+    Position after_best{};
+    position_copy_without_accumulators(after_best, root);
     do_move_copy(after_best, best_move, mem.tables);
 
     Move ponder_move = 0;

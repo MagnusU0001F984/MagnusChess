@@ -37,6 +37,7 @@ PIN_TEST_OBJ := $(OBJ_DIR)/MoveGenPinRegression.o
 ARCH_FLAGS := \
 	-m64 \
 	-mavx2 \
+	-mbmi \
 	-mbmi2 \
 	-mpopcnt \
 	-mlzcnt \
