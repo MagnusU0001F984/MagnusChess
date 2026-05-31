@@ -131,6 +131,18 @@ void tt_prefetch(const TT& tt, Key key) noexcept;
 
 void tt_save(
     TT& tt,
+    const TTProbe& probe,
+    Key key,
+    Move move,
+    i16 score,
+    i16 eval,
+    i16 depth,
+    Bound bound,
+    bool pv
+) noexcept;
+
+void tt_save(
+    TT& tt,
     Key key,
     Move move,
     i16 score,

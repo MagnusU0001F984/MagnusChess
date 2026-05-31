@@ -1470,6 +1470,31 @@ struct Searcher {
     }
 
     inline void save_tt(
+        const memory::TTProbe& probe,
+        const Position& pos,
+        int depth,
+        int ply,
+        int score,
+        int raw_eval,
+        Move best_move,
+        int alpha,
+        int beta,
+        bool pv_node
+    ) noexcept {
+        memory::tt_save(
+            mem.tt,
+            probe,
+            pos.key,
+            best_move,
+            score_to_tt_i16(score, ply),
+            raw_eval_to_tt_i16(raw_eval),
+            static_cast<i16>(depth),
+            bound_from_score(score, alpha, beta),
+            pv_node
+        );
+    }
+
+    inline void save_tt(
         const Position& pos,
         int depth,
         int ply,
@@ -1666,7 +1691,18 @@ struct Searcher {
             // Stand-pat: if the static position already fails high, no capture
             // search can make it worse for the side to move.
             if (stand_pat_eval >= beta) {
-                save_tt(pos, 0, ply, stand_pat_eval, raw_eval, tt_move, alpha0, beta, pv_node);
+                save_tt(
+                    probe,
+                    pos,
+                    0,
+                    ply,
+                    stand_pat_eval,
+                    raw_eval,
+                    tt_move,
+                    alpha0,
+                    beta,
+                    pv_node
+                );
                 return stand_pat_eval;
             }
             if (stand_pat_eval > alpha)
@@ -1681,21 +1717,33 @@ struct Searcher {
 
         if (list.size == 0) {
             const int score = checked ? (-VALUE_MATE + ply) : alpha;
-            save_tt(pos, 0, ply, score, raw_eval, 0, alpha0, beta, pv_node);
+            save_tt(probe, pos, 0, ply, score, raw_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
-        ScoredMoveList scored;
-        score_moves(pos, list, scored, tt_move, ply, 0);
-
-        Move best_move = 0;
-        int legal_count = 0;
-        for (int i = 0; i < scored.size; ++i) {
-            const Move move = pick_next(scored, i);
+        ScoredMoveList scored{};
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
             if (!legal_fast(pos, mem, info, move))
                 continue;
 
-            ++legal_count;
+            int see_value = 0;
+            scored.moves[scored.size].move = move;
+            scored.moves[scored.size].score =
+                score_move(pos, move, tt_move, ply, 0, &see_value);
+            scored.moves[scored.size].see_value = see_value;
+            ++scored.size;
+        }
+
+        if (scored.size == 0) {
+            const int score = checked ? (-VALUE_MATE + ply) : alpha;
+            save_tt(probe, pos, 0, ply, score, raw_eval, 0, alpha0, beta, pv_node);
+            return score;
+        }
+
+        Move best_move = 0;
+        for (int i = 0; i < scored.size; ++i) {
+            const Move move = pick_next(scored, i);
             const int cached_see = scored.moves[i].see_value;
 
             if (!checked &&
@@ -1742,13 +1790,7 @@ struct Searcher {
             }
         }
 
-        if (legal_count == 0) {
-            const int score = checked ? (-VALUE_MATE + ply) : alpha;
-            save_tt(pos, 0, ply, score, raw_eval, 0, alpha0, beta, pv_node);
-            return score;
-        }
-
-        save_tt(pos, 0, ply, alpha, raw_eval, best_move, alpha0, beta, pv_node);
+        save_tt(probe, pos, 0, ply, alpha, raw_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
 
@@ -1937,7 +1979,7 @@ struct Searcher {
                 ++search_obs.nmp_fail_high;
 #endif
                 if (!nmp.requires_verification) {
-                    save_tt(pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
+                    save_tt(probe, pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
                     return score;
                 }
 
@@ -1960,7 +2002,7 @@ struct Searcher {
 #if MAGNUS_SEARCH_OBS
                     ++search_obs.nmp_verified_cutoffs;
 #endif
-                    save_tt(pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
+                    save_tt(probe, pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
                     return score;
                 }
 
@@ -2046,7 +2088,18 @@ struct Searcher {
 #if MAGNUS_SEARCH_OBS
                         ++search_obs.probcut_cutoffs;
 #endif
-                        save_tt(pos, std::max(0, search_depth - PROBCUT_REDUCTION), ply, score, raw_eval, move, alpha0, beta, pv_node);
+                        save_tt(
+                            probe,
+                            pos,
+                            std::max(0, search_depth - PROBCUT_REDUCTION),
+                            ply,
+                            score,
+                            raw_eval,
+                            move,
+                            alpha0,
+                            beta,
+                            pv_node
+                        );
                         return score;
                     }
                 }
@@ -2773,7 +2826,7 @@ struct Searcher {
                 ? alpha
                 : (checked ? (-VALUE_MATE + ply) : draw_score(pos.side_to_move));
             if (!exclusion_search)
-                save_tt(pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
+                save_tt(probe, pos, tt_store_depth, ply, score, raw_eval, 0, alpha0, beta, pv_node);
             return score;
         }
 
@@ -2843,7 +2896,7 @@ struct Searcher {
         }
 
         if (!exclusion_search)
-            save_tt(pos, tt_store_depth, ply, alpha, raw_eval, best_move, alpha0, beta, pv_node);
+            save_tt(probe, pos, tt_store_depth, ply, alpha, raw_eval, best_move, alpha0, beta, pv_node);
         return alpha;
     }
 
@@ -2989,7 +3042,7 @@ struct Searcher {
         result.score = best_score;
         result.nodes = nodes;
         result.seldepth = seldepth;
-        save_tt(root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
+        save_tt(probe, root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
         return result;
     }
 };

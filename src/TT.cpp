@@ -316,6 +316,7 @@ TTProbe tt_probe(TT& tt, Key key) noexcept {
 
 void tt_save(
     TT& tt,
+    const TTProbe& pr,
     Key key,
     Move move,
     i16 score,
@@ -324,11 +325,10 @@ void tt_save(
     Bound bound,
     bool pv
 ) noexcept {
-    // Replacement is conservative when the existing entry is deeper and more exact.
-    if (!tt.clusters) return;
+    if (!tt.clusters || !pr.slot.cluster)
+        return;
 
-    TTProbe pr = tt_probe(tt, key);
-    TTData old = pr.hit ? pr.data : TTData{};
+    const TTData old = pr.hit ? pr.data : TTData{};
 
     if (move == 0 && pr.hit)
         move = old.move;
@@ -358,6 +358,23 @@ void tt_save(
     nw.spare = 0;
 
     tt_cluster_store(*pr.slot.cluster, pr.slot.lane, nw);
+}
+
+void tt_save(
+    TT& tt,
+    Key key,
+    Move move,
+    i16 score,
+    i16 eval,
+    i16 depth,
+    Bound bound,
+    bool pv
+) noexcept {
+    // Replacement is conservative when the existing entry is deeper and more exact.
+    if (!tt.clusters) return;
+
+    const TTProbe pr = tt_probe(tt, key);
+    tt_save(tt, pr, key, move, score, eval, depth, bound, pv);
 }
 
 int tt_hashfull(const TT& tt, int max_age) noexcept {
