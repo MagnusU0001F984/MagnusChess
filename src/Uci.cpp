@@ -47,6 +47,7 @@ SOFTWARE.
 #include "Mnue.h"
 #include "Nnue.h"
 #include "Search.h"
+#include "Syzygy.h"
 #include "Time.h"
 
 #ifdef _WIN32
@@ -864,6 +865,9 @@ struct UciSession {
     bool enable_ponder = true;
     int threads = DEFAULT_UCI_THREADS;
     int contempt = DEFAULT_UCI_CONTEMPT;
+    int syzygy_probe_depth = syzygy::DEFAULT_PROBE_DEPTH;
+    int syzygy_probe_limit = syzygy::DEFAULT_PROBE_LIMIT;
+    bool syzygy_50_move_rule = true;
     std::string eval_file = default_eval_file();
     std::string eval_file_p2 = default_mnue_p2_file();
     std::string syzygy_path{};
@@ -899,6 +903,7 @@ struct UciSession {
 
     ~UciSession() {
         stop_search();
+        syzygy::shutdown();
         memory::memory_free(mem);
     }
 
@@ -971,12 +976,21 @@ struct UciSession {
             << " max " << MAX_UCI_CONTEMPT << "\n";
         out << "option name Move Overhead type spin default "
             << timeman::DEFAULT_MOVE_OVERHEAD_MS
-            << " min " << timeman::DEFAULT_MOVE_OVERHEAD_MS
-            << " max " << timeman::DEFAULT_MOVE_OVERHEAD_MS << "\n";
+            << " min " << timeman::MIN_MOVE_OVERHEAD_MS
+            << " max " << timeman::MAX_MOVE_OVERHEAD_MS << "\n";
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
         out << "option name SyzygyPath type string default <empty>\n";
+        out << "option name SyzygyProbeDepth type spin default "
+            << syzygy::DEFAULT_PROBE_DEPTH
+            << " min " << syzygy::MIN_PROBE_DEPTH
+            << " max " << syzygy::MAX_PROBE_DEPTH << "\n";
+        out << "option name Syzygy50MoveRule type check default true\n";
+        out << "option name SyzygyProbeLimit type spin default "
+            << syzygy::DEFAULT_PROBE_LIMIT
+            << " min " << syzygy::MIN_PROBE_LIMIT
+            << " max " << syzygy::MAX_PROBE_LIMIT << "\n";
         out << "option name MNUEfile type string default " << eval_file_p2 << '\n';
         out << "uciok" << std::endl;
     }
@@ -1114,7 +1128,9 @@ struct UciSession {
             memory::memory_clear_hash(mem);
         }
         else if (name == "Move Overhead") {
-            // Fixed at timeman::DEFAULT_MOVE_OVERHEAD_MS until runtime tuning is implemented.
+            int parsed_overhead = 0;
+            if (parse_int(value, parsed_overhead))
+                time_manager.set_move_overhead_ms(parsed_overhead);
         }
         else if (name == "UseNNUE") {
             bool parsed = false;
@@ -1134,6 +1150,40 @@ struct UciSession {
         }
         else if (name == "SyzygyPath") {
             syzygy_path = value == "<empty>" ? std::string{} : value;
+            if (!syzygy::init(syzygy_path)) {
+                out << "info string failed to initialize Syzygy tablebases\n";
+            } else if (syzygy::max_cardinality() > 0) {
+                out << "info string Syzygy tablebases loaded up to "
+                    << syzygy::max_cardinality() << " pieces\n";
+            } else {
+                out << "info string no Syzygy tablebases found\n";
+            }
+            memory::memory_clear_hash(mem);
+        }
+        else if (name == "SyzygyProbeDepth") {
+            int parsed_depth = 0;
+            if (parse_int(value, parsed_depth)) {
+                syzygy_probe_depth = std::clamp(
+                    parsed_depth,
+                    syzygy::MIN_PROBE_DEPTH,
+                    syzygy::MAX_PROBE_DEPTH
+                );
+            }
+        }
+        else if (name == "Syzygy50MoveRule") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                syzygy_50_move_rule = parsed;
+        }
+        else if (name == "SyzygyProbeLimit") {
+            int parsed_limit = 0;
+            if (parse_int(value, parsed_limit)) {
+                syzygy_probe_limit = std::clamp(
+                    parsed_limit,
+                    syzygy::MIN_PROBE_LIMIT,
+                    syzygy::MAX_PROBE_LIMIT
+                );
+            }
         }
         else if (name == "MNUEfile") {
             if (!value.empty()) {
@@ -1521,6 +1571,9 @@ struct UciSession {
         limits.thread_id = 0;
         limits.report_info = true;
         limits.recover_ponder_pv = enable_ponder || limits.ponder;
+        limits.syzygy_probe_depth = syzygy_probe_depth;
+        limits.syzygy_probe_limit = syzygy_probe_limit;
+        limits.syzygy_50_move_rule = syzygy_50_move_rule;
         copy_history_to_limits(limits);
         stop_requested.store(false, std::memory_order_release);
         ponder_search.store(limits.ponder, std::memory_order_release);

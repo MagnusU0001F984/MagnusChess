@@ -49,9 +49,14 @@
 | `Hash` | Spin | 置换表大小（MB） |
 | `Threads` | Spin | 搜索线程数 |
 | `Contempt` | Spin | 轻视值 |
+| `Move Overhead` | Spin | 每步通信/调度预留时间（0..5000 ms，仅用于棋钟时间管理） |
 | `Clear Hash` | Button | 清除置换表 |
 | `UseNNUE` | Check | 是否使用 NNUE |
 | `Ponder` | Check | 沉思模式 |
+| `SyzygyPath` | String | Syzygy `.rtbw` / `.rtbz` 目录；空值停用 |
+| `SyzygyProbeDepth` | Spin | 达到探测子力上限时开始内部探测的最小深度（1..100） |
+| `Syzygy50MoveRule` | Check | 根节点排序是否遵守 50 步规则 |
+| `SyzygyProbeLimit` | Spin | 最大探测子力数（0..7，0=停用） |
 | `EvalFile` | String | NNUE/MNUE 网络文件路径 |
 
 ### 搜索线程管理
@@ -64,7 +69,7 @@
 
 **`info` 输出**：
 ```
-info depth <d> seldepth <s> score cp <x> nodes <n> nps <n> time <t> pv <moves>
+info depth <d> seldepth <s> score cp <x> nodes <n> nps <n> tbhits <n> time <t> pv <moves>
 ```
 
 **`bestmove` 输出**：
@@ -99,7 +104,12 @@ Standard: `uci`, `isready`, `setoption`, `position`, `go`, `stop`, `ponderhit`, 
 
 ### UCI Options (see README)
 
-`Hash`, `Threads`, `Contempt`, `Clear Hash`, `UseNNUE`, `Ponder`, `EvalFile`.
+`Hash`, `Threads`, `Contempt`, `Move Overhead`, `Clear Hash`, `UseNNUE`,
+`Ponder`, `SyzygyPath`, `SyzygyProbeDepth`, `Syzygy50MoveRule`,
+`SyzygyProbeLimit`, `EvalFile`.
+
+`Move Overhead` accepts `0..5000` ms and is applied to `wtime/btime` clock
+management. Explicit `go movetime` searches keep the requested fixed duration.
 
 ### Search Thread Management
 
@@ -107,7 +117,7 @@ Search runs in a separate thread calling `iterative_deepening()`, with `std::ato
 
 ### Output Format
 
-`info depth <d> seldepth <s> score cp <x> nodes <n> nps <n> time <t> pv <moves>`
+`info depth <d> seldepth <s> score cp <x> nodes <n> nps <n> tbhits <n> time <t> pv <moves>`
 `bestmove <move> [ponder <move>]`
 
 ### Design Notes

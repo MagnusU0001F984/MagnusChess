@@ -30,6 +30,8 @@
 | 方法 | 描述 |
 |------|------|
 | `new_game()` | 清空历史，开始新对局 |
+| `set_move_overhead_ms(value)` | 设置并限制每步预留时间到 0..5000 ms |
+| `move_overhead_ms()` | 当前每步预留时间 |
 | `build_limits(pos, params, limits)` | 从 GoParams 构建 SearchLimits（返回 false=参数无效） |
 | `record_search(root, limits, result, elapsed_ms)` | 记录搜索结果到历史（用于自适应） |
 | `history_size()` | 当前历史记录数 |
@@ -50,6 +52,10 @@
    - 根据 `movestogo` 或历史预估步数分摊
    - 软限制 = 可用时间 × scale_factor
    - 硬限制 = 可用时间 × max_factor
+
+`Move Overhead` 只用于 `wtime/btime` 棋钟管理；`movetime`、`depth`、
+`nodes` 与 `infinite` 不扣除该值。修改 overhead 会重新校准原始时间因子，
+但保留已有的 NPS、深度与稳定性历史。
 
 ### 历史自适应
 
@@ -103,6 +109,8 @@ All types and functions reside in `namespace magnus::timeman`.
 | Method | Description |
 |--------|-------------|
 | `new_game()` | Clear history for new game |
+| `set_move_overhead_ms(value)` | Set and clamp per-move reserve to 0..5000 ms |
+| `move_overhead_ms()` | Current per-move reserve |
 | `build_limits(pos, params, limits)` | Build SearchLimits from GoParams |
 | `record_search(root, limits, result, elapsed_ms)` | Record search result for adaptive tuning |
 | `history_size()` | Current history count |
@@ -117,6 +125,9 @@ All types and functions reside in `namespace magnus::timeman`.
 1. Parse `GoParams`
 2. If fixed limits specified → use directly
 3. Otherwise: compute available time, amortize by estimated remaining moves, compute soft/hard limits.
+
+`Move Overhead` applies only to `wtime/btime` clock management. Explicit
+`movetime`, `depth`, `nodes`, and `infinite` limits are not reduced by it.
 
 ### History Adaptation
 

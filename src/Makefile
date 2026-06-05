@@ -1,4 +1,5 @@
 CXX := g++
+CC := gcc
 TARGET := MagnusChess
 PIN_TEST := MoveGenPinRegression
 
@@ -24,12 +25,16 @@ SRC := \
 	Position.cpp \
 	Search.cpp \
 	See.cpp \
+	Syzygy.cpp \
 	Time.cpp \
 	TT.cpp \
 	Uci.cpp \
 	Mnue.cpp
 
-OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC))
+FATHOM_DIR := ../third_party/fathom
+FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
+
+OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ)
 DEP := $(OBJ:.o=.d)
 PIN_TEST_SRC := ../tools/MoveGenPinRegression.cpp
 PIN_TEST_OBJ := $(OBJ_DIR)/MoveGenPinRegression.o
@@ -88,7 +93,7 @@ WARN_FLAGS := \
 	-Wno-unused-parameter \
 	-Wno-sign-conversion
 
-CPPFLAGS := -MMD -MP
+CPPFLAGS := -MMD -MP -I$(FATHOM_DIR)
 
 BASE_CXXFLAGS := \
 	-std=c++20 \
@@ -98,6 +103,13 @@ BASE_CXXFLAGS := \
 	$(ENCODING_FLAGS) \
 	$(WARN_FLAGS) \
 	$(CPPFLAGS)
+
+FATHOM_CFLAGS := \
+	-std=gnu99 \
+	$(ARCH_FLAGS) \
+	-O3 \
+	-DNDEBUG \
+	-I$(FATHOM_DIR)
 
 LINK_OPT_LEVEL ?= 3
 
@@ -186,6 +198,14 @@ $(PGO_OUTPUT): $(OBJ) | $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
+
+$(FATHOM_OBJ): \
+	$(FATHOM_DIR)/tbprobe.c \
+	$(FATHOM_DIR)/tbprobe.h \
+	$(FATHOM_DIR)/tbconfig.h \
+	$(FATHOM_DIR)/tbchess.c \
+	$(FATHOM_DIR)/stdendian.h | $(OBJ_DIR)
+	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
 
 $(PIN_TEST_OBJ): $(PIN_TEST_SRC) | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@

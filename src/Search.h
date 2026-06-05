@@ -80,6 +80,12 @@ struct SearchLimits {
     bool infinite = false;              // 是否為無限搜尋模式
     bool use_time_management = false;   // 是否啟用 Stockfish 風格時間管理
     bool recover_ponder_pv = false;     // Ponder 開啟時，必要時 full-window 補主變例第二手
+    int syzygy_probe_depth = 1;          // 同等最大子力數時開始探測的最小深度
+    int syzygy_probe_limit = 0;          // 最大 Syzygy 子力數，0 = 停用
+    bool syzygy_50_move_rule = true;     // 是否區分 cursed win / blessed loss
+    bool root_in_tb = false;             // root 著法已由 Syzygy 排名
+    int root_tb_wdl = 0;                 // root WDL，範圍 -2..2
+    u64 root_tb_hits = 0;                // root 探測成功次數
 
     // --- 引擎選項 ---
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
@@ -99,6 +105,7 @@ struct SearchLimits {
     const std::atomic<bool>* pondering = nullptr;           // 沉思模式啟用標誌
     const std::atomic<int>* ponder_time_offset_ms = nullptr;// 沉思時間偏移量
     std::atomic<u64>* shared_nodes = nullptr;               // 共享節點計數器
+    std::atomic<u64>* shared_tb_hits = nullptr;             // 共享 Syzygy 命中計數器
 
     // --- 線程資訊 ---
     int thread_id = 0;                  // 本線程的 ID（0 = 主線程）
@@ -117,6 +124,7 @@ struct SearchResult {
     Move pv[MAX_PLY]{};                 // 完成深度的主變例；pv[0] 應等於 best_move
     Score score = 0;                    // 最佳著法的評分（cp 單位，從根節點視角）
     u64 nodes = 0;                      // 搜尋探索的總節點數
+    u64 tb_hits = 0;                    // 成功的 Syzygy 探測次數
     int depth = 0;                      // 完成的搜索深度（ply）
     int seldepth = 0;                   // 選擇性深度：最深的分支實際搜索深度
     int pv_length = 0;                  // 主變例長度
