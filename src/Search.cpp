@@ -44,6 +44,7 @@ SOFTWARE.
 #include "Nnue.h"
 #include "Mnue.h"
 #include "See.h"
+#include "Syzygy.h"
 
 /*
  * MagnusChess 搜尋引擎核心 — Search Engine Core
@@ -90,6 +91,7 @@ namespace {
 // Small fixed margins keep the implementation simple and the runtime overhead low.
 constexpr int VALUE_INF = 32000;
 constexpr int VALUE_MATE = 31000;
+constexpr int VALUE_TB = 30000;
 constexpr int VALUE_NONE = 32002;
 constexpr int DELTA_MARGIN = 200;
 constexpr int QS_ADJ_SHUFFLE_CAP = 80;
@@ -297,6 +299,8 @@ struct Searcher {
     u64 nodes = 0;
     u64 base_nodes = 0;
     u64 published_nodes = 0;
+    u64 tb_hits = 0;
+    u64 published_tb_hits = 0;
     int seldepth = 0;
     int root_side_to_move = WHITE;
     HistoryTables history_tables{};
@@ -311,6 +315,7 @@ struct Searcher {
     i16 pawn_correction_history[COLOR_NB][CORRECTION_HISTORY_SIZE]{};
     i16 material_correction_history[COLOR_NB][CORRECTION_HISTORY_SIZE]{};
     clock::time_point start_time{};
+    u64 limit_poll_mask = 1023ULL;
     bool stopped = false;
     bool hard_stop = false;
     bool stop_on_ponderhit = false;  // time expired during ponder, stop on next ponderhit
@@ -435,7 +440,15 @@ struct Searcher {
 #endif
 
     explicit Searcher(memory::Memory& m, const SearchLimits& l) noexcept
-        : mem(m), limits(l) {}
+        : mem(m),
+          limits(l),
+          limit_poll_mask(
+              l.hard_time_ms > 0 && l.hard_time_ms <= 100
+                  ? 63ULL
+                  : (l.hard_time_ms > 0 && l.hard_time_ms <= 1000
+                         ? 255ULL
+                         : 1023ULL)
+          ) {}
 
 #if MAGNUS_CAPTURE_OBS
     [[nodiscard]] static inline int see_bucket(int see_value) noexcept {
@@ -835,6 +848,75 @@ struct Searcher {
         return score <= -VALUE_MATE + MAX_PLY || score >= VALUE_MATE - MAX_PLY;
     }
 
+    [[nodiscard]] static inline int tablebase_score(
+        syzygy::Wdl wdl,
+        int ply,
+        bool use_rule50
+    ) noexcept {
+        const int value = static_cast<int>(wdl);
+        const int draw_threshold = use_rule50 ? 1 : 0;
+        if (value < -draw_threshold)
+            return -VALUE_TB + ply;
+        if (value > draw_threshold)
+            return VALUE_TB - ply;
+        return 2 * value * draw_threshold;
+    }
+
+    [[nodiscard]] bool probe_tablebase(
+        const Position& pos,
+        int depth,
+        int alpha,
+        int beta,
+        int ply,
+        bool pv_node,
+        bool exclusion_search,
+        int& score
+    ) noexcept {
+        if (exclusion_search ||
+            limits.syzygy_probe_limit <= 0 ||
+            pos.halfmove_clock != 0 ||
+            pos.castling_rights != NO_CASTLING) {
+            return false;
+        }
+
+        const int count = std::popcount(pos.occupied);
+        if (count > limits.syzygy_probe_limit ||
+            (count == limits.syzygy_probe_limit &&
+             depth < limits.syzygy_probe_depth)) {
+            return false;
+        }
+
+        syzygy::Wdl wdl = syzygy::Wdl::Draw;
+        if (!syzygy::probe_wdl(pos, limits.syzygy_probe_limit, wdl))
+            return false;
+
+        ++tb_hits;
+        score = tablebase_score(wdl, ply, limits.syzygy_50_move_rule);
+        const int value = static_cast<int>(wdl);
+        const int draw_threshold = limits.syzygy_50_move_rule ? 1 : 0;
+        const memory::Bound bound =
+            value < -draw_threshold ? memory::BOUND_UPPER
+            : value > draw_threshold ? memory::BOUND_LOWER
+                                     : memory::BOUND_EXACT;
+        const bool cuts =
+            bound == memory::BOUND_EXACT ||
+            (bound == memory::BOUND_LOWER ? score >= beta : score <= alpha);
+        if (!cuts)
+            return false;
+
+        memory::tt_save(
+            mem.tt,
+            pos.key,
+            Move(0),
+            score_to_tt_i16(score, ply),
+            raw_eval_to_tt_i16(VALUE_NONE),
+            static_cast<i16>(std::min(MAX_PLY - 1, depth + 6)),
+            bound,
+            pv_node
+        );
+        return true;
+    }
+
     [[nodiscard]] static inline memory::Bound tt_bound_from_probe(
         const memory::TTProbe& probe
     ) noexcept {
@@ -1043,6 +1125,18 @@ struct Searcher {
         published_nodes = nodes;
     }
 
+    inline void publish_tb_hits() noexcept {
+        if (limits.shared_tb_hits == nullptr)
+            return;
+
+        const u64 delta = tb_hits - published_tb_hits;
+        if (delta == 0)
+            return;
+
+        limits.shared_tb_hits->fetch_add(delta, std::memory_order_relaxed);
+        published_tb_hits = tb_hits;
+    }
+
     inline void update_seldepth(int ply) noexcept {
         if (ply > seldepth)
             seldepth = ply;
@@ -1118,7 +1212,7 @@ struct Searcher {
     }
 
     inline void poll_limits() noexcept {
-        if ((nodes & 1023ULL) == 0) {
+        if ((nodes & limit_poll_mask) == 0) {
             publish_nodes();
             (void)hit_hard_limit();
         }
@@ -1822,6 +1916,20 @@ struct Searcher {
         if (!exclusion_search &&
             tt_cutoff(probe, search_depth, alpha, beta, ply, tt_score))
             return tt_score;
+
+        int tb_score = 0;
+        if (probe_tablebase(
+                pos,
+                search_depth,
+                alpha,
+                beta,
+                ply,
+                pv_node,
+                exclusion_search,
+                tb_score
+            )) {
+            return tb_score;
+        }
 
         const bool checked = in_check(pos);
         const StaticEvalInfo eval_info = resolve_static_eval(pos, probe, ply, checked, false);
@@ -2995,6 +3103,7 @@ struct Searcher {
 
         result.score = best_score;
         result.nodes = nodes;
+        result.tb_hits = tb_hits;
         result.seldepth = seldepth;
         save_tt(root, depth, 0, best_score, raw_eval, result.best_move, alpha0, beta, true);
         return result;
@@ -3052,6 +3161,7 @@ struct Searcher {
         if (!stopped) {
             result.score = repair.score;
             result.nodes = nodes;
+            result.tb_hits = tb_hits;
             result.seldepth = seldepth;
         }
 
@@ -3289,6 +3399,8 @@ void reset_searcher_iteration(
     searcher.nodes = 0;
     searcher.base_nodes = base_nodes;
     searcher.published_nodes = 0;
+    searcher.tb_hits = 0;
+    searcher.published_tb_hits = 0;
     searcher.seldepth = 0;
     searcher.nmp_min_ply = 0;
     searcher.stopped = false;
@@ -3376,6 +3488,7 @@ void emit_iteration_info(
     int pv_length,
     Searcher::clock::time_point search_start,
     u64 nodes,
+    u64 tb_hits,
     int depth
 ) {
     const double seconds =
@@ -3398,6 +3511,7 @@ void emit_iteration_info(
     );
     stream << " nodes " << nodes
            << " nps " << nps
+           << " tbhits " << tb_hits
            << " hashfull " << hashfull
            << " time " << time_ms
            << " pv";
@@ -3411,7 +3525,8 @@ void emit_iteration_info(
 [[nodiscard]] IterativeWorkerResult iterative_deepening_worker(
     Searcher& searcher,
     const Position& local_root,
-    std::ostream* local_out
+    std::ostream* local_out,
+    Searcher::clock::time_point search_start
 ) {
     IterativeWorkerResult result{};
     SearchResult best{};
@@ -3419,11 +3534,14 @@ void emit_iteration_info(
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
     searcher.root_side_to_move = keyed_root.side_to_move;
-    const auto search_start = Searcher::clock::now();
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
     u64 total_nodes = 0;
+    u64 total_tb_hits = searcher.limits.shared_tb_hits == nullptr
+        ? searcher.limits.root_tb_hits
+        : 0;
     int prev_depth_end_ms = 0;  // for fixed-time per-depth cost tracking
+    Move fallback_best_move = 0;
 #if MAGNUS_SEARCHSTATS_OBS
     u64 last_reported_nodes = 0;
 #endif
@@ -3431,15 +3549,19 @@ void emit_iteration_info(
     IterationTimeState time_state{};
     if (searcher.limits.root_move_count > 0) {
         time_state.root_legal_count = searcher.limits.root_move_count;
+        fallback_best_move = searcher.limits.root_moves[0];
     } else {
         MoveList root_moves{};
         generate_legal(keyed_root, searcher.mem, root_moves);
         time_state.root_legal_count = root_moves.size;
+        if (root_moves.size > 0)
+            fallback_best_move = root_moves.moves[0];
     }
 
     for (int depth = 1; depth <= max_depth; ++depth) {
         SearchResult current{};
         u64 depth_nodes = 0;
+        u64 depth_tb_hits = 0;
 #if MAGNUS_SEARCHSTATS_OBS
         int aspiration_fail_low = 0;
         int aspiration_fail_high = 0;
@@ -3466,7 +3588,9 @@ void emit_iteration_info(
             depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
             current.seldepth = depth_max_seldepth;
             searcher.publish_nodes();
+            searcher.publish_tb_hits();
             depth_nodes += current.nodes;
+            depth_tb_hits += current.tb_hits;
 
             if (searcher.stopped || depth == 1)
                 break;
@@ -3495,17 +3619,31 @@ void emit_iteration_info(
         }
 
         if (!searcher.stopped && !move_is_none(current.best_move)) {
+            const u64 recovery_tb_hits_before = searcher.tb_hits;
             const u64 recovery_nodes =
                 searcher.recover_ponder_pv_full_window(keyed_root, current, depth);
             if (recovery_nodes > 0) {
                 depth_nodes += recovery_nodes;
+                depth_tb_hits += searcher.tb_hits >= recovery_tb_hits_before
+                    ? searcher.tb_hits - recovery_tb_hits_before
+                    : 0;
                 depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
                 current.seldepth = depth_max_seldepth;
                 searcher.publish_nodes();
+                searcher.publish_tb_hits();
             }
         }
 
+        if (searcher.limits.root_in_tb) {
+            current.score = Searcher::tablebase_score(
+                static_cast<syzygy::Wdl>(searcher.limits.root_tb_wdl),
+                0,
+                searcher.limits.syzygy_50_move_rule
+            );
+        }
+
         total_nodes += depth_nodes;
+        total_tb_hits += depth_tb_hits;
         {
             const int now_ms = searcher.timed_elapsed_ms();
             time_state.last_depth_time_ms = now_ms - prev_depth_end_ms;
@@ -3517,6 +3655,7 @@ void emit_iteration_info(
         if (!searcher.stopped || best.depth == 0) {
             best = current;
             best.nodes = total_nodes;
+            best.tb_hits = total_tb_hits;
             hint_move = current.best_move;
             capture_completed_result(result, best, searcher);
         }
@@ -3531,6 +3670,9 @@ void emit_iteration_info(
             const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                 ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                 : total_nodes;
+            const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
+                ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+                : total_tb_hits;
 #if MAGNUS_SEARCHSTATS_OBS
             const u64 reported_depth_nodes =
                 reported_nodes >= last_reported_nodes
@@ -3548,6 +3690,7 @@ void emit_iteration_info(
                 searcher.pv_length[0],
                 search_start,
                 reported_nodes,
+                reported_tb_hits,
                 depth
             );
 #if MAGNUS_SEARCHSTATS_OBS
@@ -3571,6 +3714,9 @@ void emit_iteration_info(
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
+                const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
+                    ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+                    : total_tb_hits;
                 emit_iteration_info(
                     *local_out,
                     searcher.mem,
@@ -3581,6 +3727,7 @@ void emit_iteration_info(
                     result.pv_length,
                     search_start,
                     reported_nodes,
+                    reported_tb_hits,
                     best.depth
                 );
 #if MAGNUS_SEARCHSTATS_OBS
@@ -3617,6 +3764,7 @@ void emit_iteration_info(
             if (searcher.hit_hard_limit())
                 break;
             searcher.publish_nodes();
+            searcher.publish_tb_hits();
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         if (searcher.stop_on_ponderhit) {
@@ -3626,9 +3774,20 @@ void emit_iteration_info(
     }
 
     searcher.publish_nodes();
+    searcher.publish_tb_hits();
+    if (move_is_none(result.best.best_move) && !move_is_none(fallback_best_move)) {
+        result.best.best_move = fallback_best_move;
+        result.best.pv[0] = fallback_best_move;
+        result.best.pv_length = 1;
+        result.pv[0] = fallback_best_move;
+        result.pv_length = 1;
+    }
     result.best.nodes = searcher.limits.shared_nodes != nullptr
         ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
         : total_nodes;
+    result.best.tb_hits = searcher.limits.shared_tb_hits != nullptr
+        ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
+        : total_tb_hits;
 
 #if MAGNUS_CAPTURE_OBS
     if (local_out != nullptr && searcher.limits.report_info)
@@ -3656,20 +3815,22 @@ void emit_iteration_info(
     const Position& root,
     memory::Memory& mem,
     const SearchLimits& limits,
-    std::ostream* out
+    std::ostream* out,
+    Searcher::clock::time_point search_start
 ) {
     memory::memory_new_search(mem);
 
     SearchLimits local_limits = limits;
     Searcher searcher(mem, local_limits);
-    return iterative_deepening_worker(searcher, root, out).best;
+    return iterative_deepening_worker(searcher, root, out, search_start).best;
 }
 
 [[nodiscard]] SearchResult iterative_deepening_lazy_smp(
     const Position& root,
     memory::Memory& mem,
     const SearchLimits& limits,
-    std::ostream* out
+    std::ostream* out,
+    Searcher::clock::time_point search_start
 ) {
     memory::memory_new_search(mem);
 
@@ -3761,11 +3922,14 @@ void emit_iteration_info(
         const Position& local_root,
         ScoreModel score_model,
         const IterativeWorkerResult& result,
-        Searcher::clock::time_point search_start,
-        u64 nodes
+        Searcher::clock::time_point info_search_start,
+        u64 nodes,
+        u64 tb_hits
     ) {
         const double seconds =
-            std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
+            std::chrono::duration<double>(
+                Searcher::clock::now() - info_search_start
+            ).count();
         const u64 nps = seconds > 0.0
             ? static_cast<u64>(static_cast<double>(nodes) / seconds)
             : 0ULL;
@@ -3777,6 +3941,7 @@ void emit_iteration_info(
         append_uci_score(stream, result.best.score, local_root, score_model);
         stream << " nodes " << nodes
                << " nps " << nps
+               << " tbhits " << tb_hits
                << " hashfull " << hashfull
                << " time " << time_ms
                << " pv";
@@ -3790,16 +3955,16 @@ void emit_iteration_info(
     SearchLimits main_limits = limits;
     std::atomic<bool> shared_stop{false};
     std::atomic<u64> shared_nodes{0};
+    std::atomic<u64> shared_tb_hits{limits.root_tb_hits};
     main_limits.thread_id = 0;
     main_limits.thread_count = std::max(1, limits.thread_count);
     main_limits.report_info = true;
     main_limits.external_stop = limits.stop;
     main_limits.stop = &shared_stop;
     main_limits.shared_nodes = &shared_nodes;
+    main_limits.shared_tb_hits = &shared_tb_hits;
 
     Searcher main_searcher(mem, main_limits);
-    const auto search_start = Searcher::clock::now();
-
     const int worker_count = main_limits.thread_count;
     std::vector<IterativeWorkerResult> results(static_cast<std::size_t>(worker_count));
     std::vector<std::unique_ptr<RootWorker>> helpers;
@@ -3819,12 +3984,22 @@ void emit_iteration_info(
         RootWorker* helper_ptr = helper.get();
         helper_threads.emplace_back([&, i, helper_ptr]() {
             results[static_cast<std::size_t>(i)] =
-                iterative_deepening_worker(helper_ptr->searcher, root, nullptr);
+                iterative_deepening_worker(
+                    helper_ptr->searcher,
+                    root,
+                    nullptr,
+                    search_start
+                );
         });
         helpers.push_back(std::move(helper));
     }
 
-    results[0] = iterative_deepening_worker(main_searcher, root, out);
+    results[0] = iterative_deepening_worker(
+        main_searcher,
+        root,
+        out,
+        search_start
+    );
     shared_stop.store(true, std::memory_order_release);
 
     for (std::thread& thread : helper_threads)
@@ -3838,23 +4013,48 @@ void emit_iteration_info(
         best.best.depth >= 2 &&
         !move_is_none(best.best.best_move) &&
         (best.pv_length < 2 || best.pv[0] != best.best.best_move);
-    if (selected_needs_ponder_recovery) {
+    const bool timed_search =
+        !main_limits.infinite && main_limits.hard_time_ms > 0;
+    const int wall_elapsed_before_recovery = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            Searcher::clock::now() - search_start
+        ).count()
+    );
+    const int ponder_offset_ms =
+        main_limits.ponder_time_offset_ms != nullptr
+            ? std::max(
+                  0,
+                  main_limits.ponder_time_offset_ms->load(std::memory_order_acquire)
+              )
+            : 0;
+    const int elapsed_before_recovery =
+        std::max(0, wall_elapsed_before_recovery - ponder_offset_ms);
+    const bool recovery_has_time =
+        !timed_search || elapsed_before_recovery < main_limits.hard_time_ms;
+    if (selected_needs_ponder_recovery && recovery_has_time) {
         std::atomic<bool> recovery_stop{false};
         SearchLimits recovery_limits = main_limits;
         recovery_limits.thread_count = 1;
         recovery_limits.thread_id = 0;
         recovery_limits.report_info = false;
         recovery_limits.soft_time_ms = 0;
-        recovery_limits.hard_time_ms = 0;
-        recovery_limits.infinite = true;
         recovery_limits.use_time_management = false;
         recovery_limits.ponder = false;
+        if (!timed_search) {
+            recovery_limits.hard_time_ms = 0;
+            recovery_limits.infinite = true;
+        }
         recovery_limits.stop = &recovery_stop;
         recovery_limits.external_stop = limits.stop;
         recovery_limits.shared_nodes = &shared_nodes;
+        recovery_limits.shared_tb_hits = &shared_tb_hits;
 
         Searcher recovery_searcher(mem, recovery_limits);
-        reset_searcher_iteration(recovery_searcher, Searcher::clock::now(), 0);
+        reset_searcher_iteration(
+            recovery_searcher,
+            timed_search ? search_start : Searcher::clock::now(),
+            0
+        );
         SearchResult recovered = best.best;
         (void)recovery_searcher.recover_ponder_pv_full_window(
             root,
@@ -3865,6 +4065,7 @@ void emit_iteration_info(
             recovery_searcher.pv_length[0] > 0 &&
             recovery_searcher.pv_table[0][0] == recovered.best_move) {
             recovery_searcher.publish_nodes();
+            recovery_searcher.publish_tb_hits();
             best.best = recovered;
             best.pv_length = recovery_searcher.pv_length[0];
             for (int i = 0; i < best.pv_length; ++i) {
@@ -3876,6 +4077,7 @@ void emit_iteration_info(
     }
 
     best.best.nodes = shared_nodes.load(std::memory_order_relaxed);
+    best.best.tb_hits = shared_tb_hits.load(std::memory_order_relaxed);
 
     if (best_index != 0 && out != nullptr) {
         emit_selected_info(
@@ -3887,7 +4089,8 @@ void emit_iteration_info(
                 : (main_searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
             best,
             search_start,
-            best.best.nodes
+            best.best.nodes,
+            best.best.tb_hits
         );
     }
 
@@ -3900,10 +4103,42 @@ SearchResult iterative_deepening(
     const SearchLimits& limits,
     std::ostream* out
 ) {
-    if (limits.thread_count <= 1)
-        return iterative_deepening_single(root, mem, limits, out);
+    const auto search_start = Searcher::clock::now();
+    SearchLimits prepared_limits = limits;
+    syzygy::RootProbe root_probe{};
+    if (syzygy::rank_root_moves(
+            root,
+            mem,
+            prepared_limits.syzygy_probe_limit,
+            prepared_limits.syzygy_50_move_rule,
+            prepared_limits.root_moves,
+            prepared_limits.root_move_count,
+            root_probe
+        )) {
+        prepared_limits.root_move_count = root_probe.move_count;
+        for (int i = 0; i < root_probe.move_count; ++i)
+            prepared_limits.root_moves[i] = root_probe.moves[i];
+        prepared_limits.root_in_tb = true;
+        prepared_limits.root_tb_wdl = static_cast<int>(root_probe.wdl);
+        prepared_limits.root_tb_hits = 1;
+    }
 
-    return iterative_deepening_lazy_smp(root, mem, limits, out);
+    if (prepared_limits.thread_count <= 1)
+        return iterative_deepening_single(
+            root,
+            mem,
+            prepared_limits,
+            out,
+            search_start
+        );
+
+    return iterative_deepening_lazy_smp(
+        root,
+        mem,
+        prepared_limits,
+        out,
+        search_start
+    );
 }
 
 } // namespace magnus::search

@@ -72,12 +72,19 @@ else:
 | `use_time_management` | bool | 启用时间管理 |
 | `contempt` | int | 轻视值 |
 | `use_nnue` | bool | 是否使用 NNUE |
+| `syzygy_probe_depth` | int | 满子力上限时进行内部 WDL 探测的最小深度 |
+| `syzygy_probe_limit` | int | 最大 Syzygy 探测子力数，0=停用 |
+| `syzygy_50_move_rule` | bool | 根节点排序是否遵守 50 步规则 |
 | `game_history_keys[]` | Key[] | 历史局面 Zobrist 键（重复检测） |
 | `root_moves[]` | Move[] | 限制的根节点走法（UCI searchmoves） |
 | `stop` / `external_stop` | atomic<bool>* | 停止信号 |
 | `shared_nodes` | atomic<u64>* | 跨线程共享节点计数器 |
+| `shared_tb_hits` | atomic<u64>* | 跨线程共享 Syzygy 命中计数器 |
 | `thread_id` / `thread_count` | int | 线程标识 |
 | `report_info` | bool | 是否输出 UCI info（辅助线程设为 false） |
+
+时间限制从 `iterative_deepening()` 入口开始计时。短时限会提高检查频率；
+Lazy SMP 的最终 PV 修复必须继承剩余硬期限，不能转为无限搜索。
 
 ### 搜索结果（`SearchResult`）
 
@@ -86,6 +93,7 @@ else:
 | `best_move` | Move | 最佳走法（0=无合法走法） |
 | `score` | Score | 最佳走法的评分（cp 单位，根节点视角） |
 | `nodes` | u64 | 搜索探索的总节点数 |
+| `tb_hits` | u64 | 成功的 Syzygy 探测次数 |
 | `depth` | int | 完成的搜索深度 |
 | `seldepth` | int | 选择性深度（最深分支实际搜索深度） |
 
@@ -96,6 +104,7 @@ else:
 | 技术 | 条件 | 动作 |
 |------|------|------|
 | TT 探测 | TT 命中且深度足够 | 返回缓存分数 |
+| Syzygy WDL | 无王车易位权、50 步计数为 0，且满足子力/深度限制 | 返回精确值或可截断的上下界 |
 | Razoring | `eval + margin < alpha`，深度很浅 | 返回 qsearch 结果 |
 | 反向无效裁剪（RFP） | `eval - margin >= beta` | 跳过搜索，返回 eval |
 | 空走裁剪（NMP） | 见 Nmp.cpp | 让对方走两步测试 |
@@ -197,11 +206,19 @@ Per-ply state passed between plies via the `search_stack[]` array:
 | `use_time_management` | bool | Enable time management |
 | `contempt` | int | Contempt value |
 | `use_nnue` | bool | Whether NNUE is enabled |
+| `syzygy_probe_depth` | int | Minimum internal WDL probe depth at the configured piece limit |
+| `syzygy_probe_limit` | int | Maximum Syzygy cardinality; zero disables probing |
+| `syzygy_50_move_rule` | bool | Apply the 50-move rule when ranking root moves |
 | `game_history_keys[]` | Key[] | Historical position keys (repetition detection) |
 | `root_moves[]` | Move[] | Restricted root moves (UCI searchmoves) |
 | `stop` / `external_stop` | atomic<bool>* | Stop signals |
 | `shared_nodes` | atomic<u64>* | Cross-thread shared node counter |
+| `shared_tb_hits` | atomic<u64>* | Cross-thread Syzygy hit counter |
 | `thread_id` / `thread_count` | int | Thread identification |
+
+Timing starts at the `iterative_deepening()` entry point. Short limits use more
+frequent clock polling, and final Lazy SMP PV recovery inherits the remaining
+hard deadline instead of becoming an unlimited search.
 
 ### Search Result (`SearchResult`)
 
@@ -210,6 +227,7 @@ Per-ply state passed between plies via the `search_stack[]` array:
 | `best_move` | Move | Best move found (0 = no legal moves) |
 | `score` | Score | Score of best move (cp, from root perspective) |
 | `nodes` | u64 | Total nodes explored |
+| `tb_hits` | u64 | Successful Syzygy probes |
 | `depth` | int | Completed search depth |
 | `seldepth` | int | Selective depth (deepest branch actually searched) |
 

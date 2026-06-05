@@ -52,6 +52,8 @@ SOFTWARE.
 namespace magnus::timeman {
 
 inline constexpr int DEFAULT_MOVE_OVERHEAD_MS = 10;
+inline constexpr int MIN_MOVE_OVERHEAD_MS = 0;
+inline constexpr int MAX_MOVE_OVERHEAD_MS = 5000;
 
 /*
  * GoParams — 從 UCI "go" 命令解析出的標準化時間參數
@@ -83,6 +85,9 @@ public:
 
     // new_game — 清空歷史記錄，開始新對局
     void new_game() noexcept;
+
+    void set_move_overhead_ms(int value) noexcept;
+    [[nodiscard]] int move_overhead_ms() const noexcept;
 
     /*
      * build_limits — 從 GoParams 構建 SearchLimits
@@ -146,6 +151,7 @@ private:
     std::size_t history_size_ = 0;                     // 當前記錄數
     std::size_t next_index_ = 0;                       // 下一個寫入位置
     double original_time_adjust_ = -1.0;               // 原始時間調整因子（首次計算後鎖定）
+    int move_overhead_ms_ = DEFAULT_MOVE_OVERHEAD_MS;
 
     void push_record(const SearchRecord& record) noexcept;
     [[nodiscard]] HistoryStats collect_stats(Color side) const noexcept;

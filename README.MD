@@ -123,7 +123,22 @@ If no valid MNUE file is found, MagnusChess may fall back to non-MNUE evaluation
   - `EvalFile`
 - Automatic fallback to HCE if NNUE is unavailable 🛟
 
-### 8. Time Management and UCI ⏱️🗣️
+### 8. Syzygy Tablebases
+- Native local `.rtbw` / `.rtbz` probing through the vendored MIT-licensed Fathom probe
+- Root DTZ ranking with WDL fallback
+- Internal WDL cutoffs with configurable piece and depth limits
+- 50-move-rule-aware root scores and UCI `tbhits` reporting
+
+UCI setup example:
+
+```text
+setoption name SyzygyPath value D:\tablebases
+setoption name SyzygyProbeLimit value 7
+setoption name SyzygyProbeDepth value 1
+setoption name Syzygy50MoveRule value true
+```
+
+### 9. Time Management and UCI ⏱️🗣️
 - Standard UCI commands:
   - `uci`
   - `isready`
@@ -139,6 +154,10 @@ If no valid MNUE file is found, MagnusChess may fall back to non-MNUE evaluation
   - `Clear Hash` 🧹
   - `UseNNUE` 🤖
   - `Ponder` 💭
+  - `SyzygyPath`
+  - `SyzygyProbeDepth`
+  - `Syzygy50MoveRule`
+  - `SyzygyProbeLimit`
   - `EvalFile` 📁
 - `go` supports:
   - depth 🕳️

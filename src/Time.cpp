@@ -45,10 +45,14 @@ constexpr double kTargetSingleThreadNps = 2'400'000.0;
 constexpr u64 kMnueBootstrapNps = 1'100'000ULL;
 constexpr u64 kNnueBootstrapNps = 1'700'000ULL;
 
-[[nodiscard]] inline int time_left_overhead(int remaining, int centi_mtg) noexcept {
-    const int current_move_overhead = DEFAULT_MOVE_OVERHEAD_MS * 2;
-    const int future_move_overhead = (DEFAULT_MOVE_OVERHEAD_MS * centi_mtg) / 100;
-    const int future_overhead_cap = std::max(DEFAULT_MOVE_OVERHEAD_MS, remaining / 10);
+[[nodiscard]] inline int time_left_overhead(
+    int remaining,
+    int centi_mtg,
+    int move_overhead_ms
+) noexcept {
+    const int current_move_overhead = move_overhead_ms * 2;
+    const int future_move_overhead = (move_overhead_ms * centi_mtg) / 100;
+    const int future_overhead_cap = std::max(move_overhead_ms, remaining / 10);
     return current_move_overhead + std::min(future_move_overhead, future_overhead_cap);
 }
 
@@ -97,6 +101,23 @@ std::size_t TimeManager::history_size() const noexcept {
     return history_size_;
 }
 
+void TimeManager::set_move_overhead_ms(int value) noexcept {
+    const int clamped = std::clamp(
+        value,
+        MIN_MOVE_OVERHEAD_MS,
+        MAX_MOVE_OVERHEAD_MS
+    );
+    if (move_overhead_ms_ == clamped)
+        return;
+
+    move_overhead_ms_ = clamped;
+    original_time_adjust_ = -1.0;
+}
+
+int TimeManager::move_overhead_ms() const noexcept {
+    return move_overhead_ms_;
+}
+
 bool TimeManager::build_limits(
     const Position& pos,
     const GoParams& params,
@@ -139,7 +160,7 @@ bool TimeManager::build_limits(
             1,
             remaining
                 + (increment * (centi_mtg - 100)) / 100
-                - time_left_overhead(remaining, centi_mtg)
+                - time_left_overhead(remaining, centi_mtg, move_overhead_ms_)
         );
 
         double opt_scale = 1.0;
@@ -176,7 +197,7 @@ bool TimeManager::build_limits(
         int optimum = std::max(1, static_cast<int>(opt_scale * double(time_left)));
         const int maximum_cap = std::max(
             1,
-            static_cast<int>(0.825179 * double(remaining) - DEFAULT_MOVE_OVERHEAD_MS)
+            static_cast<int>(0.825179 * double(remaining) - move_overhead_ms_)
         );
         const int scaled_maximum = std::max(
             std::max(1, remaining / 4),
