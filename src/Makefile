@@ -22,7 +22,9 @@ SRC := \
 	MoveGen.cpp \
 	Nmp.cpp \
 	Nnue.cpp \
+	PerftMoveGen.cpp \
 	Perft.cpp \
+	PerftPosition.cpp \
 	Position.cpp \
 	Search.cpp \
 	See.cpp \
@@ -37,6 +39,9 @@ FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ)
 DEP := $(OBJ:.o=.d)
+PERFT_CORE_OBJ := \
+	$(OBJ_DIR)/PerftMoveGen.o \
+	$(OBJ_DIR)/PerftPosition.o
 PIN_TEST_SRC := ../tools/MoveGenPinRegression.cpp
 PIN_TEST_OBJ := $(OBJ_DIR)/MoveGenPinRegression.o
 HISTORY_TEST_SRC := ../tools/HistoryRegression.cpp
@@ -205,6 +210,11 @@ $(PGO_OUTPUT): $(OBJ) | $(BIN_DIR)
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
+
+# Keep the large perft-only implementation opaque to whole-program LTO so
+# adding or tuning it cannot repartition the search code during LTRANS.
+$(PERFT_CORE_OBJ): $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
+	$(CXX) $(BASE_CXXFLAGS) -fno-lto -c $< -o $@
 
 $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/tbprobe.c \
