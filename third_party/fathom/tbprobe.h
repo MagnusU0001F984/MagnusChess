@@ -339,6 +339,7 @@ int tb_probe_root_dtz(
     bool     _turn,
     bool hasRepeated,
     bool useRule50,
+    bool rankDTZ,
     struct TbRootMoves *_results);
 
 /*

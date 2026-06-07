@@ -58,6 +58,7 @@ struct RootProbe {
     int move_count = 0;
     int rank = 0;
     Wdl wdl = Wdl::Draw;
+    bool used_dtz = false;
 };
 
 [[nodiscard]] bool init(std::string_view path) noexcept;
@@ -78,7 +79,9 @@ void shutdown() noexcept;
     bool use_rule50,
     const Move* allowed_moves,
     int allowed_move_count,
-    RootProbe& result
+    RootProbe& result,
+    bool rank_against_all_legal = false,
+    bool rank_dtz = false
 ) noexcept;
 
 } // namespace syzygy

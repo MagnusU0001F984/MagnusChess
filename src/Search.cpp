@@ -255,6 +255,18 @@ inline void append_uci_score(
         return;
     }
 
+    if (std::abs(score) >= VALUE_TB - MAX_PLY &&
+        std::abs(score) <= VALUE_TB) {
+        constexpr int TB_CP = 20000;
+        const int distance = VALUE_TB - std::abs(score);
+        const int display_score =
+            score > 0 ? TB_CP - distance : -TB_CP + distance;
+        out << "score cp " << display_score
+            << " wdl "
+            << (score > 0 ? "1000 0 0" : "0 0 1000");
+        return;
+    }
+
     int display_score = score;
     if (score_model == ScoreModel::Mnue)
         display_score = mnue::search_score_to_cp(score, root);
@@ -929,9 +941,11 @@ struct Searcher {
         bool pv_node,
         bool exclusion_search,
         int& score,
+        memory::Bound& bound,
         bool& resolved
     ) noexcept {
         resolved = false;
+        bound = memory::BOUND_NONE;
         if (exclusion_search ||
             limits.syzygy_probe_limit <= 0 ||
             pos.halfmove_clock != 0 ||
@@ -955,7 +969,7 @@ struct Searcher {
         score = tablebase_score(wdl, ply, limits.syzygy_50_move_rule);
         const int value = static_cast<int>(wdl);
         const int draw_threshold = limits.syzygy_50_move_rule ? 1 : 0;
-        const memory::Bound bound =
+        bound =
             value < -draw_threshold ? memory::BOUND_UPPER
             : value > draw_threshold ? memory::BOUND_LOWER
                                      : memory::BOUND_EXACT;
@@ -2303,6 +2317,7 @@ struct Searcher {
             return tt_score;
 
         int tb_score = 0;
+        memory::Bound tb_bound = memory::BOUND_NONE;
         bool tablebase_resolved = false;
         if (probe_tablebase(
                 pos,
@@ -2313,9 +2328,17 @@ struct Searcher {
                 pv_node,
                 exclusion_search,
                 tb_score,
+                tb_bound,
                 tablebase_resolved
             )) {
             return tb_score;
+        }
+        int tablebase_max_score = VALUE_INF;
+        if (tablebase_resolved && pv_node) {
+            if (tb_bound == memory::BOUND_LOWER)
+                alpha = std::max(alpha, tb_score);
+            else if (tb_bound == memory::BOUND_UPPER)
+                tablebase_max_score = tb_score;
         }
 
         const bool checked = in_check(pos);
@@ -3395,6 +3418,7 @@ struct Searcher {
             update_correction_history(side, eval_info.keys, base_eval, alpha, search_depth);
         }
 
+        alpha = std::min(alpha, tablebase_max_score);
         if (!exclusion_search)
             save_tt(pos, tt_store_depth, ply, alpha, raw_eval, best_move, alpha0, beta, pv_node);
         return alpha;
@@ -3903,6 +3927,155 @@ struct IterativeWorkerResult {
     int pv_length = 0;
 };
 
+[[nodiscard]] bool pv_contains_key(
+    const std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 2>& keys,
+    int key_count,
+    Key key
+) noexcept {
+    for (int i = 0; i < key_count; ++i)
+        if (keys[static_cast<std::size_t>(i)] == key)
+            return true;
+    return false;
+}
+
+[[nodiscard]] int pv_key_occurrences(
+    const std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 2>& keys,
+    int key_count,
+    Key key
+) noexcept {
+    int count = 0;
+    for (int i = 0; i < key_count; ++i)
+        count += keys[static_cast<std::size_t>(i)] == key;
+    return count;
+}
+
+void extend_syzygy_pv(
+    const Position& root,
+    const memory::Memory& mem,
+    const SearchLimits& limits,
+    Move* pv,
+    int& pv_length,
+    int score
+) {
+    const int root_tb_score = Searcher::tablebase_score(
+        static_cast<syzygy::Wdl>(limits.root_tb_wdl),
+        0,
+        limits.syzygy_50_move_rule
+    );
+    if (!limits.root_in_tb ||
+        limits.syzygy_probe_limit <= 0 ||
+        (std::abs(score) < VALUE_TB - MAX_PLY &&
+         std::abs(root_tb_score) < VALUE_TB - MAX_PLY) ||
+        std::abs(score) >= VALUE_MATE - MAX_PLY ||
+        pv_length <= 0 ||
+        move_is_none(pv[0])) {
+        return;
+    }
+
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(10);
+    Position pos{};
+    position_copy_without_accumulators(pos, root);
+
+    std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 2> keys{};
+    int key_count = 0;
+    const int history_count =
+        std::min(limits.game_history_count, MAX_GAME_HISTORY);
+    for (int i = 0; i < history_count; ++i)
+        keys[static_cast<std::size_t>(key_count++)] = limits.game_history_keys[i];
+    keys[static_cast<std::size_t>(key_count++)] = pos.key;
+
+    StateInfo first_state{};
+    make_move(pos, pv[0], mem.tables, first_state);
+    keys[static_cast<std::size_t>(key_count++)] = pos.key;
+
+    int kept_length = 1;
+    while (kept_length < pv_length &&
+           kept_length < MAX_PLY &&
+           std::chrono::steady_clock::now() < deadline) {
+        const Move candidate = pv[kept_length];
+        syzygy::RootProbe probe{};
+        if (!syzygy::rank_root_moves(
+                pos,
+                mem,
+                limits.syzygy_probe_limit,
+                limits.syzygy_50_move_rule,
+                &candidate,
+                1,
+                probe,
+                true,
+                false
+            )) {
+            break;
+        }
+
+        Position next{};
+        position_copy_without_accumulators(next, pos);
+        do_move_copy(next, candidate, mem.tables);
+        if ((limits.syzygy_50_move_rule && next.halfmove_clock >= 100) ||
+            pv_contains_key(keys, key_count, next.key)) {
+            break;
+        }
+
+        pos = next;
+        keys[static_cast<std::size_t>(key_count++)] = pos.key;
+        ++kept_length;
+    }
+    pv_length = kept_length;
+
+    while (pv_length < MAX_PLY &&
+           std::chrono::steady_clock::now() < deadline) {
+        syzygy::RootProbe probe{};
+        if (!syzygy::rank_root_moves(
+                pos,
+                mem,
+                limits.syzygy_probe_limit,
+                limits.syzygy_50_move_rule,
+                nullptr,
+                0,
+                probe,
+                true,
+                true
+            ) ||
+            !probe.used_dtz ||
+            probe.move_count <= 0) {
+            break;
+        }
+
+        Move move = Move(0);
+        Position next{};
+        int best_tie_break = -VALUE_INF;
+        for (int i = 0; i < probe.move_count; ++i) {
+            Position candidate{};
+            position_copy_without_accumulators(candidate, pos);
+            do_move_copy(candidate, probe.moves[i], mem.tables);
+            if ((limits.syzygy_50_move_rule && candidate.halfmove_clock >= 100) ||
+                pv_key_occurrences(keys, key_count, candidate.key) >= 2) {
+                continue;
+            }
+
+            MoveList replies{};
+            generate_legal(candidate, mem, replies);
+            int tie_break = -replies.size;
+            for (int j = 0; j < replies.size; ++j)
+                if (move_is_capture(replies.moves[j]))
+                    tie_break -= 100;
+
+            if (tie_break > best_tie_break) {
+                best_tie_break = tie_break;
+                move = probe.moves[i];
+                next = candidate;
+            }
+        }
+        if (move_is_none(move))
+            break;
+
+        pv[pv_length++] = move;
+        pos = next;
+        keys[static_cast<std::size_t>(key_count++)] = pos.key;
+    }
+}
+
 void capture_completed_result(
     IterativeWorkerResult& result,
     const SearchResult& best,
@@ -4073,7 +4246,8 @@ void emit_iteration_info(
             }
         }
 
-        if (searcher.limits.root_in_tb) {
+        if (searcher.limits.root_in_tb &&
+            std::abs(current.score) < VALUE_MATE - MAX_PLY) {
             current.score = Searcher::tablebase_score(
                 static_cast<syzygy::Wdl>(searcher.limits.root_tb_wdl),
                 0,
@@ -4266,7 +4440,40 @@ void emit_iteration_info(
 
     SearchLimits local_limits = limits;
     Searcher searcher(mem, local_limits);
-    return iterative_deepening_worker(searcher, root, out, search_start).best;
+    IterativeWorkerResult result =
+        iterative_deepening_worker(searcher, root, out, search_start);
+    const int searched_pv_length = result.pv_length;
+    extend_syzygy_pv(
+        root,
+        mem,
+        local_limits,
+        result.pv,
+        result.pv_length,
+        result.best.score
+    );
+    result.best.pv_length = result.pv_length;
+    for (int i = 0; i < result.pv_length; ++i)
+        result.best.pv[i] = result.pv[i];
+
+    if (out != nullptr &&
+        local_limits.report_info &&
+        result.pv_length > searched_pv_length) {
+        emit_iteration_info(
+            *out,
+            mem,
+            root,
+            searcher,
+            result.best,
+            result.pv,
+            result.pv_length,
+            search_start,
+            result.best.nodes,
+            result.best.tb_hits,
+            result.best.depth
+        );
+    }
+
+    return result.best;
 }
 
 [[nodiscard]] SearchResult iterative_deepening_lazy_smp(
@@ -4524,8 +4731,21 @@ void emit_iteration_info(
 
     best.best.nodes = shared_nodes.load(std::memory_order_relaxed);
     best.best.tb_hits = shared_tb_hits.load(std::memory_order_relaxed);
+    const int searched_pv_length = best.pv_length;
+    extend_syzygy_pv(
+        root,
+        mem,
+        main_limits,
+        best.pv,
+        best.pv_length,
+        best.best.score
+    );
+    best.best.pv_length = best.pv_length;
+    for (int i = 0; i < best.pv_length; ++i)
+        best.best.pv[i] = best.pv[i];
 
-    if (best_index != 0 && out != nullptr) {
+    if ((best_index != 0 || best.pv_length > searched_pv_length) &&
+        out != nullptr) {
         emit_selected_info(
             *out,
             mem,
