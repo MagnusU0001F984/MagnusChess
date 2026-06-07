@@ -520,7 +520,7 @@ static void init_indices(void);
 static int probe_wdl(Pos *pos, int *success);
 static int probe_dtz(Pos *pos, int *success);
 static int root_probe_wdl(const Pos *pos, bool useRule50, struct TbRootMoves *rm);
-static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, struct TbRootMoves *rm);
+static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, bool rankDTZ, struct TbRootMoves *rm);
 static uint16_t probe_root(Pos *pos, int *score, unsigned *results);
 
 unsigned tb_probe_wdl_impl(
@@ -629,6 +629,7 @@ int tb_probe_root_dtz(
     bool     turn,
     bool     hasRepeated,
     bool     useRule50,
+    bool     rankDTZ,
     struct TbRootMoves *results) {
     Pos pos =
     {
@@ -645,7 +646,7 @@ int tb_probe_root_dtz(
         turn
     };
     if (castling != 0) return 0;
-    return root_probe_dtz(&pos, hasRepeated, useRule50, results);
+    return root_probe_dtz(&pos, hasRepeated, useRule50, rankDTZ, results);
 }
 
 int tb_probe_root_wdl(
@@ -2339,7 +2340,7 @@ int probe_dtz(Pos *pos, int *success)
 
 // Use the DTZ tables to rank and score all root moves in the list.
 // A return value of 0 means that not all probes were successful.
-static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, struct TbRootMoves *rm)
+static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, bool rankDTZ, struct TbRootMoves *rm)
 {
   int v, success;
 
@@ -2384,8 +2385,10 @@ static int root_probe_dtz(const Pos *pos, bool hasRepeated, bool useRule50, stru
     // Note that moves ranked 900 have dtz + cnt50 == 100, which in rare
     // cases may be insufficient to win as dtz may be one off (see the
     // comments before TB_probe_dtz()).
-    int r =  v > 0 ? (v + cnt50 <= 99 && !hasRepeated ? 1000 : 1000 - (v + cnt50))
-           : v < 0 ? (-v * 2 + cnt50 < 100 ? -1000 : -1000 + (-v + cnt50))
+    int r =  v > 0 ? (v + cnt50 <= 99 && !hasRepeated ? 1000 - (rankDTZ ? v : 0)
+                                                      : 1000 - (v + cnt50))
+           : v < 0 ? (-v * 2 + cnt50 < 100 ? -1000 - (rankDTZ ? v : 0)
+                                           : -1000 + (-v + cnt50))
            : 0;
     m->tbRank = r;
 

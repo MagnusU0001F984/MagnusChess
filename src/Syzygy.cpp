@@ -212,7 +212,9 @@ bool rank_root_moves(
     bool use_rule50,
     const Move* allowed_moves,
     int allowed_move_count,
-    RootProbe& result
+    RootProbe& result,
+    bool rank_against_all_legal,
+    bool rank_dtz
 ) noexcept {
     result = {};
     if (!position_is_probeable(pos, probe_limit))
@@ -235,8 +237,10 @@ bool rank_root_moves(
         tb.white_to_move,
         false,
         use_rule50,
+        rank_dtz,
         &ranked
     );
+    result.used_dtz = success != 0;
     if (!success) {
         success = tb_probe_root_wdl(
             tb.white,
@@ -264,7 +268,10 @@ bool rank_root_moves(
     int best_rank = -32'000;
     for (unsigned i = 0; i < ranked.size; ++i) {
         const Move move = match_root_move(legal_moves, ranked.moves[i].move);
-        if (move_is_none(move) ||
+        if (move_is_none(move)) {
+            continue;
+        }
+        if (!rank_against_all_legal &&
             !move_is_allowed(move, allowed_moves, allowed_move_count)) {
             continue;
         }

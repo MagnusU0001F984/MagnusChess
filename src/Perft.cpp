@@ -24,6 +24,8 @@ SOFTWARE.
 
 #include "Attack.h"
 #include "Perft.h"
+#include "PerftMoveGen.h"
+#include "PerftPosition.h"
 #include "MoveGen.h"
 
 #include <algorithm>
@@ -53,43 +55,47 @@ constexpr const char* kAnsiRed = "\x1b[31m";
 constexpr const char* kAnsiGreen = "\x1b[32m";
 constexpr const char* kAnsiReset = "\x1b[0m";
 
-NodeCount perft_serial_mut(Position& pos, const memory::Memory& mem, int depth) {
+using perft_detail::PerftMoveList;
+using perft_detail::PerftPosition;
+using perft_detail::PerftUndo;
+
+NodeCount perft_serial_mut(
+    PerftPosition& pos,
+    const memory::Memory& mem,
+    int depth
+) {
     if (depth <= 0) return 1;
 
-    MoveList list{};
-    generate_legal(pos, mem, list);
-
     if (depth == 1)
-        return static_cast<NodeCount>(list.size);
+        return static_cast<NodeCount>(perft_detail::count_legal(pos, mem));
+
+    PerftMoveList list{};
+    perft_detail::generate_legal(pos, mem, list);
 
     NodeCount nodes = 0;
 
     for (int i = 0; i < list.size; ++i) {
-        StateInfo st{};
-        make_move(pos, list.moves[i], mem.tables, st);
+        PerftUndo undo{};
+        perft_detail::make_move(pos, list.moves[i], undo);
         nodes += perft_serial_mut(pos, mem, depth - 1);
-        unmake_move(pos, list.moves[i], mem.tables, st);
+        perft_detail::unmake_move(pos, list.moves[i], undo);
     }
 
     return nodes;
 }
 
 NodeCount perft_serial(const Position& pos, const memory::Memory& mem, int depth) {
-    Position work{};
-    position_copy_without_accumulators(work, pos);
+    PerftPosition work{};
+    perft_detail::import_position(work, pos);
     return perft_serial_mut(work, mem, depth);
 }
 
-struct PerftTask {
-    Position pos;
-    int depth;
-};
-
-void push_light_task(std::vector<PerftTask>& out, const Position& pos, int depth) {
-    PerftTask& task = out.emplace_back();
-    position_copy_without_accumulators(task.pos, pos);
-    task.depth = depth;
-}
+NodeCount perft_mt_pos(
+    const PerftPosition& pos,
+    const memory::Memory& mem,
+    int depth,
+    std::size_t threads
+);
 
 struct PerftDivideResult {
     std::vector<PerftDivideRow> rows;
@@ -233,8 +239,11 @@ PerftDivideResult compute_divide_result(const Position& pos,
                                         std::ostream& os) {
     using clock = std::chrono::steady_clock;
 
-    MoveList list{};
-    generate_legal(pos, mem, list);
+    PerftPosition work{};
+    perft_detail::import_position(work, pos);
+
+    PerftMoveList list{};
+    perft_detail::generate_legal(work, mem, list);
 
     PerftDivideResult result;
     result.root_moves = list.size;
@@ -247,21 +256,19 @@ PerftDivideResult compute_divide_result(const Position& pos,
         render_divide_table_header(os);
     }
 
-    Position work{};
-    position_copy_without_accumulators(work, pos);
     for (int i = 0; i < list.size; ++i) {
         const Move m = list.moves[i];
-        StateInfo st{};
-        make_move(work, m, mem.tables, st);
+        PerftUndo undo{};
+        perft_detail::make_move(work, m, undo);
 
         const auto start = clock::now();
         const NodeCount child = (depth <= 1)
             ? 1
-            : (threads > 1 ? perft_mt(work, mem, depth - 1, threads)
+            : (threads > 1 ? perft_mt_pos(work, mem, depth - 1, threads)
                            : perft_serial_mut(work, mem, depth - 1));
         const auto end = clock::now();
 
-        unmake_move(work, m, mem.tables, st);
+        perft_detail::unmake_move(work, m, undo);
 
         const double seconds = std::chrono::duration<double>(end - start).count();
         const double knps = seconds > 0.0 ? (static_cast<double>(child) / seconds) / 1000.0 : 0.0;
@@ -286,54 +293,42 @@ PerftDivideResult compute_divide_result(const Position& pos,
 }
 
 void expand_frontier_once(
-    const std::vector<PerftTask>& in,
+    const std::vector<PerftPosition>& in,
     const memory::Memory& mem,
-    std::vector<PerftTask>& out,
+    int depth,
+    std::vector<PerftPosition>& out,
     NodeCount& finished_nodes
 ) {
-    // Expand one wave of tasks so the multithreaded path has enough work to distribute.
     out.clear();
 
-    for (const PerftTask& task : in) {
-        if (task.depth <= 0) {
+    for (const PerftPosition& task : in) {
+        if (depth <= 0) {
             finished_nodes += 1;
             continue;
         }
 
-        MoveList list{};
-        generate_legal(task.pos, mem, list);
-
-        if (task.depth == 1) {
-            finished_nodes += static_cast<NodeCount>(list.size);
+        if (depth == 1) {
+            finished_nodes += static_cast<NodeCount>(
+                perft_detail::count_legal(task, mem)
+            );
             continue;
         }
 
-        Position work{};
-        position_copy_without_accumulators(work, task.pos);
+        PerftMoveList list{};
+        perft_detail::generate_legal(task, mem, list);
+
+        PerftPosition work = task;
         for (int i = 0; i < list.size; ++i) {
-            StateInfo st{};
-            make_move(work, list.moves[i], mem.tables, st);
-            push_light_task(out, work, task.depth - 1);
-            unmake_move(work, list.moves[i], mem.tables, st);
+            PerftUndo undo{};
+            perft_detail::make_move(work, list.moves[i], undo);
+            out.push_back(work);
+            perft_detail::unmake_move(work, list.moves[i], undo);
         }
     }
 }
 
-} // namespace
-
-/*
- * Perft (效能測試) 實作
- * perft() — 單線程遞歸節點計數（用於正確性驗證）
- * perft_mt() — 多線程並行 Perft
- * divide() — 互動式分割輸出（每個根著法分開計數）
- * benchmark_generation() — 著法生成器原始速度基準測試
- */
-NodeCount perft(const Position& pos, const memory::Memory& mem, int depth) {
-    return perft_serial(pos, mem, depth);
-}
-
-NodeCount perft_mt(
-    const Position& pos,
+NodeCount perft_mt_pos(
+    const PerftPosition& pos,
     const memory::Memory& mem,
     int depth,
     std::size_t threads
@@ -341,24 +336,31 @@ NodeCount perft_mt(
     if (depth <= 0)
         return 1;
 
-    if (threads <= 1 || depth <= 2)
-        return perft_serial(pos, mem, depth);
+    if (threads <= 1 || depth <= 2) {
+        PerftPosition work = pos;
+        return perft_serial_mut(work, mem, depth);
+    }
 
-    // 关键改动：
-    // Do not split work only by root move. Instead, expand a small frontier
-    // first so the thread pool receives enough evenly sized tasks.
     constexpr int max_split_ply = 2;
     const std::size_t target_tasks = std::max<std::size_t>(threads * 16, 128);
 
     NodeCount finished_nodes = 0;
-    std::vector<PerftTask> frontier;
-    std::vector<PerftTask> next_frontier;
-    push_light_task(frontier, pos, depth);
+    std::vector<PerftPosition> frontier;
+    std::vector<PerftPosition> next_frontier;
+    frontier.push_back(pos);
 
     int split_ply = 0;
+    int frontier_depth = depth;
     while (split_ply < max_split_ply && frontier.size() < target_tasks) {
-        expand_frontier_once(frontier, mem, next_frontier, finished_nodes);
+        expand_frontier_once(
+            frontier,
+            mem,
+            frontier_depth,
+            next_frontier,
+            finished_nodes
+        );
         frontier.swap(next_frontier);
+        --frontier_depth;
         ++split_ply;
 
         if (frontier.empty())
@@ -386,23 +388,48 @@ NodeCount perft_mt(
                 if (i >= frontier.size())
                     break;
 
-                Position work{};
-                position_copy_without_accumulators(work, frontier[i].pos);
-                local += perft_serial_mut(work, mem, frontier[i].depth);
+                PerftPosition work = frontier[i];
+                local += perft_serial_mut(work, mem, frontier_depth);
             }
 
             partial[tid] = local;
         });
     }
 
-    for (std::thread& t : pool)
-        t.join();
+    for (std::thread& thread : pool)
+        thread.join();
 
     NodeCount nodes = finished_nodes;
-    for (NodeCount x : partial)
-        nodes += x;
+    for (NodeCount count : partial)
+        nodes += count;
 
     return nodes;
+}
+
+} // namespace
+
+/*
+ * Perft (效能測試) 實作
+ * perft() — 單線程遞歸節點計數（用於正確性驗證）
+ * perft_mt() — 多線程並行 Perft
+ * divide() — 互動式分割輸出（每個根著法分開計數）
+ * benchmark_generation() — 著法生成器原始速度基準測試
+ */
+NodeCount perft(const Position& pos, const memory::Memory& mem, int depth) {
+    return perft_serial(pos, mem, depth);
+}
+
+NodeCount perft_mt(
+    const Position& pos,
+    const memory::Memory& mem,
+    int depth,
+    std::size_t threads
+) {
+    // 关键改动：
+    PerftPosition root{};
+    perft_detail::import_position(root, pos);
+
+    return perft_mt_pos(root, mem, depth, threads);
 }
 
 void divide(const Position& pos,
@@ -432,12 +459,14 @@ GenSpeedResult benchmark_generation(
     using clock = std::chrono::steady_clock;
 
     std::uint64_t total_moves = 0;
+    PerftPosition work{};
+    perft_detail::import_position(work, pos);
     auto start = clock::now();
 
     for (std::uint64_t i = 0; i < iterations; ++i) {
-        MoveList list{};
-        generate_legal(pos, mem, list);
-        total_moves += static_cast<std::uint64_t>(list.size);
+        total_moves += static_cast<std::uint64_t>(
+            perft_detail::count_legal(work, mem)
+        );
     }
 
     auto end = clock::now();
