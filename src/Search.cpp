@@ -93,6 +93,10 @@ constexpr int VALUE_INF = 32000;
 constexpr int VALUE_MATE = 31000;
 constexpr int VALUE_TB = 30000;
 constexpr int VALUE_NONE = 32002;
+constexpr int VALUE_MATE_IN_MAX_PLY = VALUE_MATE - MAX_PLY;
+constexpr int VALUE_MATED_IN_MAX_PLY = -VALUE_MATE_IN_MAX_PLY;
+constexpr int VALUE_TB_WIN_IN_MAX_PLY = VALUE_TB - MAX_PLY;
+constexpr int VALUE_TB_LOSS_IN_MAX_PLY = -VALUE_TB_WIN_IN_MAX_PLY;
 constexpr int DELTA_MARGIN = 200;
 constexpr int QS_ADJ_SHUFFLE_CAP = 80;
 constexpr int FUTILITY_BASE_MARGIN = 72;
@@ -163,6 +167,74 @@ constexpr int CORRECTION_WEIGHT_SUM =
     CORRECTION_POSITION_WEIGHT
     + CORRECTION_PAWN_WEIGHT
     + CORRECTION_MATERIAL_WEIGHT;
+
+[[nodiscard]] constexpr bool is_valid_score(int score) noexcept {
+    return score != VALUE_NONE;
+}
+
+[[nodiscard]] constexpr bool is_win(int score) noexcept {
+    return is_valid_score(score) && score >= VALUE_TB_WIN_IN_MAX_PLY;
+}
+
+[[nodiscard]] constexpr bool is_loss(int score) noexcept {
+    return is_valid_score(score) && score <= VALUE_TB_LOSS_IN_MAX_PLY;
+}
+
+[[nodiscard]] constexpr bool is_decisive(int score) noexcept {
+    return is_win(score) || is_loss(score);
+}
+
+[[nodiscard]] constexpr bool is_mate_score(int score) noexcept {
+    return is_valid_score(score)
+        && (score >= VALUE_MATE_IN_MAX_PLY || score <= VALUE_MATED_IN_MAX_PLY);
+}
+
+[[nodiscard]] constexpr int score_to_tt(int score, int ply) noexcept {
+    return is_win(score) ? score + ply
+         : is_loss(score) ? score - ply
+                          : score;
+}
+
+[[nodiscard]] constexpr int score_from_tt(
+    int score,
+    int ply,
+    int halfmove_clock
+) noexcept {
+    if (!is_valid_score(score))
+        return VALUE_NONE;
+
+    const int remaining = std::max(0, 100 - halfmove_clock);
+    if (is_win(score)) {
+        if ((score >= VALUE_MATE_IN_MAX_PLY && VALUE_MATE - score > remaining)
+            || VALUE_TB - score > remaining) {
+            return VALUE_TB_WIN_IN_MAX_PLY - 1;
+        }
+        return score - ply;
+    }
+
+    if (is_loss(score)) {
+        if ((score <= VALUE_MATED_IN_MAX_PLY && VALUE_MATE + score > remaining)
+            || VALUE_TB + score > remaining) {
+            return VALUE_TB_LOSS_IN_MAX_PLY + 1;
+        }
+        return score + ply;
+    }
+
+    return score;
+}
+
+static_assert(score_to_tt(123, 17) == 123);
+static_assert(
+    score_from_tt(score_to_tt(VALUE_MATE - 23, 7), 19, 0)
+    == VALUE_MATE - 35
+);
+static_assert(
+    score_from_tt(score_to_tt(VALUE_TB - 11, 7), 19, 0)
+    == VALUE_TB - 23
+);
+static_assert(!is_decisive(score_from_tt(VALUE_MATE - 5, 0, 96)));
+static_assert(!is_decisive(score_from_tt(VALUE_TB - 8, 0, 93)));
+static_assert(score_from_tt(VALUE_TB - 7, 0, 93) == VALUE_TB - 7);
 
 #ifndef MAGNUS_SEARCH_OBS
 #define MAGNUS_SEARCH_OBS 0
@@ -874,26 +946,10 @@ struct Searcher {
     }
 #endif
 
-    // Mate scores are stored relative to the current ply so TT hits remain
-    // consistent when reused at a different depth from the root.
-    [[nodiscard]] static inline int score_to_tt(int score, int ply) noexcept {
-        if (score >= VALUE_MATE - MAX_PLY)
-            return score + ply;
-        if (score <= -VALUE_MATE + MAX_PLY)
-            return score - ply;
-        return score;
-    }
-
-    [[nodiscard]] static inline int score_from_tt(int score, int ply) noexcept {
-        if (score >= VALUE_MATE - MAX_PLY)
-            return score - ply;
-        if (score <= -VALUE_MATE + MAX_PLY)
-            return score + ply;
-        return score;
-    }
-
     [[nodiscard]] static inline i16 score_to_tt_i16(int score, int ply) noexcept {
-        return static_cast<i16>(std::clamp(score_to_tt(score, ply), -VALUE_INF, VALUE_INF));
+        return static_cast<i16>(
+            std::clamp(score_to_tt(score, ply), -VALUE_INF, VALUE_INF)
+        );
     }
 
     [[nodiscard]] static inline i16 raw_eval_to_tt_i16(int raw_eval) noexcept {
@@ -915,7 +971,7 @@ struct Searcher {
     }
 
     [[nodiscard]] static inline bool is_mate_window(int score) noexcept {
-        return score <= -VALUE_MATE + MAX_PLY || score >= VALUE_MATE - MAX_PLY;
+        return is_mate_score(score);
     }
 
     [[nodiscard]] static inline int tablebase_score(
@@ -1742,7 +1798,7 @@ struct Searcher {
         int score,
         int depth
     ) noexcept {
-        if (base_eval == VALUE_NONE || is_mate_window(score))
+        if (base_eval == VALUE_NONE || is_decisive(score))
             return;
 
         const int delta = std::clamp(
@@ -1944,12 +2000,13 @@ struct Searcher {
         int alpha,
         int beta,
         int ply,
+        int halfmove_clock,
         int& score
     ) const noexcept {
         if (!probe.hit || probe.data.depth < depth)
             return false;
 
-        score = score_from_tt(probe.data.score, ply);
+        score = score_from_tt(probe.data.score, ply, halfmove_clock);
 
         switch (static_cast<memory::Bound>(probe.data.flags & 0x3U)) {
             case memory::BOUND_EXACT:
@@ -2009,8 +2066,9 @@ struct Searcher {
         if (!qsearch_node || checked || !probe.hit)
             return info;
 
-        const int tt_score = score_from_tt(probe.data.score, ply);
-        if (is_mate_window(tt_score))
+        const int tt_score =
+            score_from_tt(probe.data.score, ply, pos.halfmove_clock);
+        if (is_decisive(tt_score))
             return info;
 
         switch (tt_bound_from_probe(probe)) {
@@ -2145,7 +2203,7 @@ struct Searcher {
             return repetition_score(pos.side_to_move, tt_raw_eval_from_probe(probe));
 
         int tt_score = 0;
-        if (tt_cutoff(probe, 0, alpha, beta, ply, tt_score))
+        if (tt_cutoff(probe, 0, alpha, beta, ply, pos.halfmove_clock, tt_score))
             return tt_score;
 
         const bool checked = in_check(pos);
@@ -2300,7 +2358,9 @@ struct Searcher {
         const Move probed_tt_move = tt_move_from_probe(probe);
         const Move tt_move = exclusion_search ? Move(0) : probed_tt_move;
         const memory::Bound tt_bound = tt_bound_from_probe(probe);
-        const int probed_tt_score = probe.hit ? score_from_tt(probe.data.score, ply) : 0;
+        const int probed_tt_score = probe.hit
+            ? score_from_tt(probe.data.score, ply, pos.halfmove_clock)
+            : 0;
 
         int search_depth = depth;
         if (!pv_node &&
@@ -2313,7 +2373,15 @@ struct Searcher {
 
         int tt_score = 0;
         if (!exclusion_search &&
-            tt_cutoff(probe, search_depth, alpha, beta, ply, tt_score))
+            tt_cutoff(
+                probe,
+                search_depth,
+                alpha,
+                beta,
+                ply,
+                pos.halfmove_clock,
+                tt_score
+            ))
             return tt_score;
 
         int tb_score = 0;
