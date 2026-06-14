@@ -25,7 +25,12 @@ SOFTWARE.
 #pragma once
 
 #include <string>
-#include "Position.h"
+
+#include "Types.h"
+
+namespace magnus {
+struct Position;
+}
 
 /*
  * NNUE 公開介面 — 高效更新的神經網路 (Efficiently Updatable Neural Network)

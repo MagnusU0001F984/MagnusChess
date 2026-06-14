@@ -50,6 +50,7 @@ If no valid MNUE file is found, MagnusChess may fall back to non-MNUE evaluation
   - eval cache 🧮
   - king-square cache 👑
   - other hot search state ⚡
+  - board core: `board/Attack.*`, `board/MoveGen.*`, `board/Position.*`
 - Main modules:
   - `MoveGen` ♞
   - `Search` 🔍
@@ -181,31 +182,53 @@ setoption name Syzygy50MoveRule value true
 
 ### Directory Layout 📁
 - Source: `src/` 🧾
-- Binaries: `src/bin/` 🚀
-- Build artifacts: `src/build/` 🏗️
+- Build output: `src/build/` 🚀
+- Object files: `src/build/obj/`
 
 ### Windows / PowerShell + MinGW 🪟⚙️
 ```powershell
 cd src
 mingw32-make clean
-mingw32-make -j
-````
+mingw32-make auto -j
+```
 
 Output:
 
-* `src/bin/magnus.exe` 🦄
+* `src/build/MagnusChess.exe` 🦄
 
 ### Linux / WSL / MSYS2 🐧⚙️
 
 ```bash
 cd src
 make clean
-make -j
+make auto -j
+```
+
+### 64-bit Build Profiles
+
+```bash
+# Detect the local CPU through -march=native.
+# Output: build/MagnusChess[.exe]
+make auto -j
+
+# Portable x86-64 baseline without AVX2/BMI2/POPCNT requirements or PEXT.
+# Output: build/MagnusChess-portable64[.exe]
+make portable64 -j
+
+# Enable instruction sets supported by the build machine.
+# Output: build/MagnusChess-native64[.exe]
+make native64 -j
+
+# Build both variants.
+make variants -j
+
+# Display detected target, selected profile, and CPU flags.
+make detect
 ```
 
 Output:
 
-* `src/bin/magnus` 🦄
+* `src/build/MagnusChess` 🦄
 
 ### Optional PGO Flow 🔥📈
 
@@ -219,7 +242,7 @@ make pgo-generate
 2. Run representative workloads to generate profile data:
 
 ```bash
-./bin/magnus_pgo search 20 64
+./build/MagnusChess_pgo search 20 64
 ```
 
 3. Rebuild with profile use:
@@ -236,23 +259,26 @@ make pgo-use
 
 ```bash
 # No arguments starts UCI mode
-./src/bin/magnus
+./src/build/MagnusChess
 
 # Equivalent explicit form
-./src/bin/magnus uci
+./src/build/MagnusChess uci
 ```
 
 ### Bench / Perft / Divide / Fixed-Depth Search 🧪⚡
 
 ```bash
-# perft: <depth> <hash_mb> <threads>
-./src/bin/magnus 6 64 1
+# perft: [perft] <depth> <hash_mb> <threads> [backend]
+./src/build/MagnusChess perft 6 64 1 magic
 
-# divide: divide <depth> <hash_mb> <threads> [live]
-./src/bin/magnus divide 6 64 1
+# backend: auto | pext | magic | table | classical
+./src/build/MagnusChess 6 64 1 pext
+
+# divide: divide <depth> <hash_mb> <threads> [live] [backend]
+./src/build/MagnusChess divide 6 64 1 live magic
 
 # search: search <depth> <hash_mb>
-./src/bin/magnus search 8 64
+./src/build/MagnusChess search 8 64
 ```
 
 ---

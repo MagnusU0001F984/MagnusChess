@@ -22,36 +22,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-/* ===== ANNOTATED: 繁體中文註釋已添加 =====
- * 本檔案是 MagnusChess 西洋棋引擎的一部分。
- * 詳細說明請參閱對應的 .cpp 實作檔案。
- */
-
-
 #pragma once
 
-#include "Types.h"
+#include <cassert>
+
 #include "Memory.h"
 #include "Position.h"
+#include "Types.h"
 
 namespace magnus {
-
-/*
-Move generation combines bitboards, attack tables, pin masks, and a final
-legality filter. The code keeps a simple external API while reusing the same
-helpers for captures, evasions, and full legal move lists.
-*/
-
-constexpr int MAX_MOVES = 384;
-
-enum GenType : int {
-    GEN_CAPTURES = 0,
-    GEN_QUIETS,
-    GEN_NON_EVASIONS,
-    GEN_EVASIONS,
-    GEN_PSEUDO_LEGAL,
-    GEN_LEGAL
-};
 
 /*
     16-bit move layout
@@ -79,14 +58,79 @@ enum MoveFlag : u16 {
     MOVE_CAP_PROMO_Q  = 15
 };
 
-/* 著法列表結構體 — MoveList：用於 Perft 和搜尋的純著法容器
- * ScoredMove：含評分欄位，用於著法排序（qsearch/root/probcut）
- * ScoredMoveList：評分著法列表，含 see_value 快取
- * GenInfo：著法生成上下文（將軍狀態、釘子、攻擊遮罩等）
- * 著法編碼：16 位元 [to:6|from:6|flag:4]，flag 區分安靜/捕獲/升變/易位/過路兵
- */
+constexpr Square from_sq(Move move) noexcept {
+    return static_cast<Square>((move >> 6) & 63);
+}
+
+constexpr Square to_sq(Move move) noexcept {
+    return static_cast<Square>(move & 63);
+}
+
+constexpr u16 move_flag(Move move) noexcept {
+    return static_cast<u16>((move >> 12) & 15);
+}
+
+constexpr Move make_move(
+    Square from,
+    Square to,
+    u16 flag = MOVE_QUIET
+) noexcept {
+    return static_cast<Move>(
+        (to & 63) | ((from & 63) << 6) | ((flag & 15) << 12)
+    );
+}
+
+constexpr bool move_is_none(Move move) noexcept {
+    return move == 0;
+}
+
+constexpr bool move_is_capture(Move move) noexcept {
+    const u16 flag = move_flag(move);
+    return flag == MOVE_CAPTURE || flag == MOVE_EP ||
+           flag >= MOVE_CAP_PROMO_N;
+}
+
+constexpr bool move_is_promotion(Move move) noexcept {
+    return move_flag(move) >= MOVE_PROMO_N;
+}
+
+constexpr bool move_is_underpromotion(Move move) noexcept {
+    const u16 flag = move_flag(move);
+    return flag == MOVE_PROMO_N || flag == MOVE_PROMO_B ||
+           flag == MOVE_PROMO_R || flag == MOVE_CAP_PROMO_N ||
+           flag == MOVE_CAP_PROMO_B || flag == MOVE_CAP_PROMO_R;
+}
+
+constexpr bool move_is_castle(Move move) noexcept {
+    const u16 flag = move_flag(move);
+    return flag == MOVE_OO || flag == MOVE_OOO;
+}
+
+constexpr bool move_is_ep(Move move) noexcept {
+    return move_flag(move) == MOVE_EP;
+}
+
+constexpr bool move_is_double_push(Move move) noexcept {
+    return move_flag(move) == MOVE_DOUBLE_PUSH;
+}
+
+constexpr PieceType promo_piece(Move move) noexcept {
+    switch (move_flag(move)) {
+        case MOVE_PROMO_N:
+        case MOVE_CAP_PROMO_N: return KNIGHT;
+        case MOVE_PROMO_B:
+        case MOVE_CAP_PROMO_B: return BISHOP;
+        case MOVE_PROMO_R:
+        case MOVE_CAP_PROMO_R: return ROOK;
+        case MOVE_PROMO_Q:
+        case MOVE_CAP_PROMO_Q: return QUEEN;
+        default: return QUEEN;
+    }
+}
+
+constexpr int MAX_MOVES = 384;
+
 struct MoveList {
-    // Plain move container used by perft and search.
     Move moves[MAX_MOVES];
     int size = 0;
 };
@@ -100,6 +144,37 @@ struct ScoredMove {
 struct ScoredMoveList {
     ScoredMove moves[MAX_MOVES];
     int size = 0;
+};
+
+inline void movelist_clear(MoveList& list) noexcept {
+    list.size = 0;
+}
+
+inline void scored_movelist_clear(ScoredMoveList& list) noexcept {
+    list.size = 0;
+}
+
+inline void movelist_push(MoveList& list, Move move) noexcept {
+    assert(list.size >= 0 && list.size < MAX_MOVES);
+    list.moves[list.size++] = move;
+}
+
+inline void scored_movelist_push(
+    ScoredMoveList& list,
+    Move move,
+    i32 score
+) noexcept {
+    assert(list.size >= 0 && list.size < MAX_MOVES);
+    list.moves[list.size++] = {move, score};
+}
+
+enum GenType : int {
+    GEN_CAPTURES = 0,
+    GEN_QUIETS,
+    GEN_NON_EVASIONS,
+    GEN_EVASIONS,
+    GEN_PSEUDO_LEGAL,
+    GEN_LEGAL
 };
 
 struct GenInfo {
@@ -125,88 +200,7 @@ struct GenInfo {
     bool double_check = false;
 };
 
-// Move decoding helpers for the compact 16-bit move format.
-constexpr Square from_sq(Move m) noexcept {
-    return static_cast<Square>((m >> 6) & 63);
-}
 
-constexpr Square to_sq(Move m) noexcept {
-    return static_cast<Square>(m & 63);
-}
-
-constexpr u16 move_flag(Move m) noexcept {
-    return static_cast<u16>((m >> 12) & 15);
-}
-
-constexpr Move make_move(Square from, Square to, u16 flag = MOVE_QUIET) noexcept {
-    return static_cast<Move>((to & 63) | ((from & 63) << 6) | ((flag & 15) << 12));
-}
-
-constexpr bool move_is_none(Move m) noexcept {
-    return m == 0;
-}
-
-constexpr bool move_is_capture(Move m) noexcept {
-    const u16 f = move_flag(m);
-    return f == MOVE_CAPTURE || f == MOVE_EP || f >= MOVE_CAP_PROMO_N;
-}
-
-constexpr bool move_is_promotion(Move m) noexcept {
-    return move_flag(m) >= MOVE_PROMO_N;
-}
-
-constexpr bool move_is_underpromotion(Move m) noexcept {
-    const u16 f = move_flag(m);
-    return f == MOVE_PROMO_N || f == MOVE_PROMO_B || f == MOVE_PROMO_R ||
-           f == MOVE_CAP_PROMO_N || f == MOVE_CAP_PROMO_B || f == MOVE_CAP_PROMO_R;
-}
-
-constexpr bool move_is_castle(Move m) noexcept {
-    const u16 f = move_flag(m);
-    return f == MOVE_OO || f == MOVE_OOO;
-}
-
-constexpr bool move_is_ep(Move m) noexcept {
-    return move_flag(m) == MOVE_EP;
-}
-
-constexpr bool move_is_double_push(Move m) noexcept {
-    return move_flag(m) == MOVE_DOUBLE_PUSH;
-}
-
-constexpr PieceType promo_piece(Move m) noexcept {
-    switch (move_flag(m)) {
-        case MOVE_PROMO_N:
-        case MOVE_CAP_PROMO_N: return KNIGHT;
-        case MOVE_PROMO_B:
-        case MOVE_CAP_PROMO_B: return BISHOP;
-        case MOVE_PROMO_R:
-        case MOVE_CAP_PROMO_R: return ROOK;
-        case MOVE_PROMO_Q:
-        case MOVE_CAP_PROMO_Q: return QUEEN;
-        default: return QUEEN;
-    }
-}
-
-inline void movelist_clear(MoveList& list) noexcept {
-    list.size = 0;
-}
-
-inline void scored_movelist_clear(ScoredMoveList& list) noexcept {
-    list.size = 0;
-}
-
-inline void movelist_push(MoveList& list, Move m) noexcept {
-    list.moves[list.size++] = m;
-}
-
-inline void scored_movelist_push(ScoredMoveList& list, Move m, i32 score) noexcept {
-    list.moves[list.size++] = {m, score};
-}
-
-/*
-    Attack and king-safety helpers
-*/
 Bitboard attackers_to(
     const Position& pos,
     const memory::Memory& mem,
@@ -252,9 +246,7 @@ void init_gen_info(
     const memory::Memory& mem
 ) noexcept;
 
-/*
-    Move legality
-*/
+
 bool pseudo_legal(
     const Position& pos,
     const memory::Memory& mem,
@@ -293,9 +285,7 @@ bool move_gives_check(
     Move m
 ) noexcept;
 
-/*
-    Core generation API
-*/
+
 Move* generate_captures(
     Position& pos,
     const memory::Memory& mem,

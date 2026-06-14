@@ -29,11 +29,11 @@ SOFTWARE.
 #include <string>
 
 #include "Memory.h"
-#include "MoveGen.h"
-#include "Position.h"
+#include "board/MoveGen.h"
+#include "board/Position.h"
 
 extern "C" {
-#include "../third_party/fathom/tbprobe.h"
+#include <tbprobe.h>
 }
 
 namespace magnus::syzygy {

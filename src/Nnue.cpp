@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "Nnue.h"
+#include "board/Position.h"
 
 #include <algorithm>
 #include <array>

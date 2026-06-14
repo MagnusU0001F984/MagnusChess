@@ -33,8 +33,8 @@ SOFTWARE.
 #include <string_view>
 #include <streambuf>
 
-#include "MoveGen.h"
-#include "Position.h"
+#include "board/MoveGen.h"
+#include "board/Position.h"
 #include "Search.h"
 
 namespace magnus {
@@ -43,10 +43,10 @@ namespace magnus {
     static const std::string cached = []() -> std::string {
         constexpr const char* candidates[] = {
             "Evalfile.bin",
-            "bin/Evalfile.bin",
-            "src/bin/Evalfile.bin",
+            "build/Evalfile.bin",
+            "src/build/Evalfile.bin",
             "src/Evalfile.bin",
-            "src/bin/quantised.bin",
+            "src/build/quantised.bin",
             "NnueFile/nn-2a5d6101d177.nnue",
             "src/NnueFile/nn-2a5d6101d177.nnue",
             "NnueFile/nn-37f18f62d772.nnue",

@@ -32,6 +32,7 @@ SOFTWARE.
 
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "Memory.h"
 
@@ -40,7 +41,7 @@ namespace magnus {
 /*
 Attack generation is split into leaper lookups and slider backends. The public
 API hides whether bishops and rooks are served by classical scans, dense tables,
-or BMI2/PEXT indexing.
+magic multiplication, or BMI2/PEXT indexing.
 */
 
 using AttackBitboard = memory::Bitboard;
@@ -138,8 +139,9 @@ enum class AttackBackendKind : int {
 };
 
 struct SliderAttackEntry {
-    // Dense-table metadata for one bishop or rook source square.
+    // Lookup metadata for one bishop or rook source square.
     AttackBitboard mask = 0ULL;
+    AttackBitboard magic = 0ULL;
     std::uint32_t offset = 0;
     std::uint8_t relevant_bits = 0;
     std::uint8_t shift = 0;
@@ -148,6 +150,7 @@ struct SliderAttackEntry {
 void attack_init_backend(memory::Memory& mem) noexcept;
 void attack_set_backend(AttackBackendKind kind) noexcept;
 void attack_auto_select_backend() noexcept;
+bool attack_select_backend(std::string_view name) noexcept;
 AttackBackendKind attack_backend_kind() noexcept;
 const char* attack_backend_name() noexcept;
 bool attack_backend_uses_slider_tables() noexcept;

@@ -29,8 +29,11 @@ SOFTWARE.
 #include <string>
 
 #include "Memory.h"
-#include "Position.h"
 #include "Types.h"
+
+namespace magnus {
+struct Position;
+}
 
 /*
  * 搜尋層公開介面 — MagnusChess 的核心搜尋引擎。

@@ -27,6 +27,7 @@ SOFTWARE.
 #include "Position.h"
 
 #include <bit>
+#include <cstdlib>
 
 /*
 This file builds legal move lists from bitboards plus precomputed attack tables.
@@ -44,77 +45,365 @@ namespace magnus {
 
 namespace {
 
-inline Color opposite(Color c) noexcept {
-    return c == WHITE ? BLACK : WHITE;
+[[nodiscard]] constexpr Color query_opposite(Color color) noexcept {
+    return color == WHITE ? BLACK : WHITE;
 }
 
-inline Square lsb_sq(Bitboard bb) noexcept {
-    return static_cast<Square>(std::countr_zero(bb));
+[[nodiscard]] inline Square query_lsb_sq(Bitboard bitboard) noexcept {
+    return static_cast<Square>(std::countr_zero(bitboard));
 }
 
-inline bool more_than_one(Bitboard bb) noexcept {
-    return (bb & (bb - 1)) != 0;
+[[nodiscard]] constexpr bool query_more_than_one(Bitboard bitboard) noexcept {
+    return (bitboard & (bitboard - 1)) != 0ULL;
 }
 
-inline Bitboard pieces_bb(const Position& pos, Color c, PieceType pt) noexcept {
-    return pos.color_bb[c] & pos.piece_bb[pt];
+[[nodiscard]] inline Bitboard query_pieces_bb(
+    const Position& pos,
+    Color color,
+    PieceType piece_type
+) noexcept {
+    return pos.color_bb[color] & pos.piece_bb[piece_type];
 }
 
-inline Bitboard diag_sliders_bb(const Position& pos, Color c) noexcept {
-    return pieces_bb(pos, c, BISHOP) | pieces_bb(pos, c, QUEEN);
+[[nodiscard]] inline Bitboard query_diagonal_sliders(
+    const Position& pos,
+    Color color
+) noexcept {
+    return query_pieces_bb(pos, color, BISHOP) |
+           query_pieces_bb(pos, color, QUEEN);
 }
 
-inline Bitboard ortho_sliders_bb(const Position& pos, Color c) noexcept {
-    return pieces_bb(pos, c, ROOK) | pieces_bb(pos, c, QUEEN);
+[[nodiscard]] inline Bitboard query_orthogonal_sliders(
+    const Position& pos,
+    Color color
+) noexcept {
+    return query_pieces_bb(pos, color, ROOK) |
+           query_pieces_bb(pos, color, QUEEN);
 }
 
-inline Bitboard attacks_by_color_on_occ(
+Bitboard query_attacks_by_color_on_occupancy(
     const Position& pos,
     const memory::Memory& mem,
     Color by,
     Bitboard occupied
 ) noexcept {
     Bitboard attacks = 0ULL;
-
-    Bitboard pawns   = pieces_bb(pos, by, PAWN);
-    Bitboard knights = pieces_bb(pos, by, KNIGHT);
-    Bitboard bishops = pieces_bb(pos, by, BISHOP);
-    Bitboard rooks   = pieces_bb(pos, by, ROOK);
-    Bitboard queens  = pieces_bb(pos, by, QUEEN);
-    Bitboard kings   = pieces_bb(pos, by, KING);
+    Bitboard pawns = query_pieces_bb(pos, by, PAWN);
+    Bitboard knights = query_pieces_bb(pos, by, KNIGHT);
+    Bitboard bishops = query_pieces_bb(pos, by, BISHOP);
+    Bitboard rooks = query_pieces_bb(pos, by, ROOK);
+    Bitboard queens = query_pieces_bb(pos, by, QUEEN);
+    Bitboard kings = query_pieces_bb(pos, by, KING);
 
     while (pawns) {
-        const Square sq = lsb_sq(pawns);
+        const Square sq = query_lsb_sq(pawns);
         pawns &= pawns - 1;
         attacks |= pawn_attacks(mem, by, sq);
     }
     while (knights) {
-        const Square sq = lsb_sq(knights);
+        const Square sq = query_lsb_sq(knights);
         knights &= knights - 1;
         attacks |= knight_attacks(mem, sq);
     }
     while (bishops) {
-        const Square sq = lsb_sq(bishops);
+        const Square sq = query_lsb_sq(bishops);
         bishops &= bishops - 1;
         attacks |= bishop_attacks_fast(mem, sq, occupied);
     }
     while (rooks) {
-        const Square sq = lsb_sq(rooks);
+        const Square sq = query_lsb_sq(rooks);
         rooks &= rooks - 1;
         attacks |= rook_attacks_fast(mem, sq, occupied);
     }
     while (queens) {
-        const Square sq = lsb_sq(queens);
+        const Square sq = query_lsb_sq(queens);
         queens &= queens - 1;
         attacks |= queen_attacks_fast(mem, sq, occupied);
     }
     while (kings) {
-        const Square sq = lsb_sq(kings);
+        const Square sq = query_lsb_sq(kings);
         kings &= kings - 1;
         attacks |= king_attacks(mem, sq);
     }
 
     return attacks;
+}
+
+void query_compute_pinners_and_pinned(
+    const Position& pos,
+    const memory::Memory& mem,
+    Color us,
+    Bitboard& pinners,
+    Bitboard& pinned
+) noexcept {
+    const Color them = query_opposite(us);
+    const Square king_sq = pos.king_sq[us];
+    const Bitboard own = pos.color_bb[us];
+
+    pinners =
+        (rook_xray_attacks(mem, king_sq, pos.occupied, own) &
+         query_orthogonal_sliders(pos, them)) |
+        (bishop_xray_attacks(mem, king_sq, pos.occupied, own) &
+         query_diagonal_sliders(pos, them));
+
+    pinned = 0ULL;
+    Bitboard remaining = pinners;
+
+    while (remaining) {
+        const Square pinner_sq = query_lsb_sq(remaining);
+        remaining &= remaining - 1;
+        pinned |= between_bb(mem, king_sq, pinner_sq) & own;
+    }
+}
+
+} // namespace
+
+Bitboard attackers_to_color(
+    const Position& pos,
+    const memory::Memory& mem,
+    Square sq,
+    Color by,
+    Bitboard occupied
+) noexcept {
+    const Bitboard bishops =
+        query_pieces_bb(pos, by, BISHOP) | query_pieces_bb(pos, by, QUEEN);
+    const Bitboard rooks =
+        query_pieces_bb(pos, by, ROOK) | query_pieces_bb(pos, by, QUEEN);
+
+    return (pawn_attacks(mem, query_opposite(by), sq) &
+            query_pieces_bb(pos, by, PAWN)) |
+           (knight_attacks(mem, sq) & query_pieces_bb(pos, by, KNIGHT)) |
+           (king_attacks(mem, sq) & query_pieces_bb(pos, by, KING)) |
+           (bishop_attacks_fast(mem, sq, occupied) & bishops) |
+           (rook_attacks_fast(mem, sq, occupied) & rooks);
+}
+
+Bitboard attackers_to(
+    const Position& pos,
+    const memory::Memory& mem,
+    Square sq,
+    Bitboard occupied
+) noexcept {
+    return attackers_to_color(pos, mem, sq, WHITE, occupied) |
+           attackers_to_color(pos, mem, sq, BLACK, occupied);
+}
+
+Bitboard checkers_bb(
+    const Position& pos,
+    const memory::Memory& mem,
+    Color us
+) noexcept {
+    return attackers_to_color(
+        pos,
+        mem,
+        pos.king_sq[us],
+        query_opposite(us),
+        pos.occupied
+    );
+}
+
+Bitboard pinners_bb(
+    const Position& pos,
+    const memory::Memory& mem,
+    Color us
+) noexcept {
+    Bitboard pinners = 0ULL;
+    Bitboard pinned = 0ULL;
+    query_compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
+    return pinners;
+}
+
+Bitboard pinned_bb(
+    const Position& pos,
+    const memory::Memory& mem,
+    Color us
+) noexcept {
+    Bitboard pinners = 0ULL;
+    Bitboard pinned = 0ULL;
+    query_compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
+    return pinned;
+}
+
+Bitboard danger_bb(
+    const Position& pos,
+    const memory::Memory& mem,
+    Color by
+) noexcept {
+    const Color us = query_opposite(by);
+    const Bitboard occupied = pos.occupied ^ bb_of(pos.king_sq[us]);
+    return query_attacks_by_color_on_occupancy(pos, mem, by, occupied);
+}
+
+void init_gen_info(
+    GenInfo& info,
+    const Position& pos,
+    const memory::Memory& mem
+) noexcept {
+    info.us = static_cast<Color>(pos.side_to_move);
+    info.them = query_opposite(info.us);
+    info.king_sq = pos.king_sq[info.us];
+    info.ep_sq = pos.ep_sq;
+    info.occupied = pos.occupied;
+    info.us_occ = pos.color_bb[info.us];
+    info.them_occ = pos.color_bb[info.them];
+    info.checkers = checkers_bb(pos, mem, info.us);
+    query_compute_pinners_and_pinned(
+        pos,
+        mem,
+        info.us,
+        info.pinners,
+        info.pinned
+    );
+    info.danger = 0ULL;
+    info.in_check = info.checkers != 0ULL;
+    info.double_check = query_more_than_one(info.checkers);
+
+    if (!info.in_check) {
+        info.capture_mask = info.them_occ;
+        info.push_mask = ~info.occupied;
+        return;
+    }
+
+    if (info.double_check) {
+        info.capture_mask = 0ULL;
+        info.push_mask = 0ULL;
+        return;
+    }
+
+    const Square checker_sq = query_lsb_sq(info.checkers);
+    const Bitboard checker_mask = bb_of(checker_sq);
+    const Bitboard slider_checkers =
+        query_diagonal_sliders(pos, info.them) |
+        query_orthogonal_sliders(pos, info.them);
+
+    info.capture_mask = checker_mask;
+    info.push_mask = (checker_mask & slider_checkers)
+        ? between_bb(mem, info.king_sq, checker_sq)
+        : 0ULL;
+}
+
+namespace {
+
+[[nodiscard]] constexpr Color opposite(Color color) noexcept {
+    return color == WHITE ? BLACK : WHITE;
+}
+
+[[nodiscard]] inline Bitboard pieces_bb(
+    const Position& pos,
+    Color color,
+    PieceType piece_type
+) noexcept {
+    return pos.color_bb[color] & pos.piece_bb[piece_type];
+}
+
+[[nodiscard]] inline Bitboard diagonal_sliders(
+    const Position& pos,
+    Color color
+) noexcept {
+    return pieces_bb(pos, color, BISHOP) | pieces_bb(pos, color, QUEEN);
+}
+
+[[nodiscard]] inline Bitboard orthogonal_sliders(
+    const Position& pos,
+    Color color
+) noexcept {
+    return pieces_bb(pos, color, ROOK) | pieces_bb(pos, color, QUEEN);
+}
+
+[[nodiscard]] inline Bitboard pin_mask_for(
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Square from
+) noexcept {
+    return (info.pinned & bb_of(from))
+        ? line_bb(mem, info.king_sq, from)
+        : ~0ULL;
+}
+
+[[nodiscard]] inline bool square_attacked_by_them(
+    const Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Square sq
+) noexcept {
+    const Bitboard occupied_without_king =
+        info.occupied ^ bb_of(info.king_sq);
+    return attackers_to_color(
+        pos,
+        mem,
+        sq,
+        info.them,
+        occupied_without_king
+    ) != 0ULL;
+}
+
+[[nodiscard]] inline bool legal_slow(
+    Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return false;
+
+    const Color us = static_cast<Color>(pos.side_to_move);
+    const Color them = opposite(us);
+
+    StateInfo state{};
+    make_move(pos, move, mem.tables, state);
+
+    const Square king_sq = pos.king_sq[us];
+    const bool is_legal =
+        attackers_to_color(pos, mem, king_sq, them, pos.occupied) == 0ULL;
+
+    unmake_move(pos, move, mem.tables, state);
+    return is_legal;
+}
+
+[[nodiscard]] inline bool legal_fast_impl(
+    Position& pos,
+    const memory::Memory& mem,
+    const GenInfo& info,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return false;
+
+    const Square from = from_sq(move);
+    const Piece moving = piece_on(pos, from);
+    if (moving == PIECE_NONE)
+        return false;
+
+    if (type_of(moving) == KING)
+        return true;
+
+    if (move_is_ep(move))
+        return legal_slow(pos, mem, move);
+
+    if ((info.pinned & bb_of(from)) == 0ULL)
+        return true;
+
+    return (line_bb(mem, info.king_sq, from) & bb_of(to_sq(move))) != 0ULL;
+}
+
+[[nodiscard]] inline bool needs_legal_filter(
+    const Position&,
+    const GenInfo& info,
+    Move move
+) noexcept {
+    if (move_is_none(move) || move_is_ep(move))
+        return true;
+
+    const Square from = from_sq(move);
+    return from == info.king_sq || (info.pinned & bb_of(from)) != 0ULL;
+}
+
+} // namespace
+
+namespace {
+
+
+inline Square lsb_sq(Bitboard bb) noexcept {
+    return static_cast<Square>(std::countr_zero(bb));
 }
 
 inline Move* append_moves_from_mask(
@@ -180,16 +469,6 @@ inline Move* append_promotion_moves(
         *out++ = make_move(from, to, MOVE_PROMO_Q);
     }
     return out;
-}
-
-inline Bitboard pin_mask_for(
-    const memory::Memory& mem,
-    const GenInfo& info,
-    Square from
-) noexcept {
-    // A pinned piece may only move along the full rank/file/diagonal through
-    // the king and the piece, including squares toward the pinner.
-    return (info.pinned & bb_of(from)) ? line_bb(mem, info.king_sq, from) : ~0ULL;
 }
 
 enum class PieceMoveMode {
@@ -653,16 +932,6 @@ inline Move* generate_pawn_evasions(
     return generate_pawn_moves<PieceMoveMode::Evasions>(pos, mem, info, out);
 }
 
-inline bool square_attacked_by_them(
-    const Position& pos,
-    const memory::Memory& mem,
-    const GenInfo& info,
-    Square sq
-) noexcept {
-    const Bitboard occupied_without_king = info.occupied ^ bb_of(info.king_sq);
-    return attackers_to_color(pos, mem, sq, info.them, occupied_without_king) != 0ULL;
-}
-
 template<MoveFlag QuietFlag, MoveFlag CaptureFlag>
 inline Move* append_safe_king_moves_from_mask(
     const Position& pos,
@@ -995,89 +1264,6 @@ inline Move* generate_quiet_non_evasions_with_info(
     return out;
 }
 
-inline void compute_pinners_and_pinned(
-    const Position& pos,
-    const memory::Memory& mem,
-    Color us,
-    Bitboard& pinners,
-    Bitboard& pinned
-) noexcept {
-    const Color them = opposite(us);
-    const Square ksq = pos.king_sq[us];
-    const Bitboard own = pos.color_bb[us];
-
-    pinners = 0ULL;
-    pinners |= rook_xray_attacks(mem, ksq, pos.occupied, own) & ortho_sliders_bb(pos, them);
-    pinners |= bishop_xray_attacks(mem, ksq, pos.occupied, own) & diag_sliders_bb(pos, them);
-
-    pinned = 0ULL;
-    Bitboard tmp = pinners;
-    while (tmp) {
-        const Square psq = lsb_sq(tmp);
-        tmp &= tmp - 1;
-        pinned |= between_bb(mem, ksq, psq) & own;
-    }
-}
-
-inline bool legal_slow(
-    Position& pos,
-    const memory::Memory& mem,
-    Move m
-) noexcept {
-    if (move_is_none(m))
-        return false;
-
-    const Color us   = static_cast<Color>(pos.side_to_move);
-    const Color them = (us == WHITE ? BLACK : WHITE);
-
-    StateInfo st{};
-    make_move(pos, m, mem.tables, st);
-
-    const Square ksq = pos.king_sq[us];
-    const bool legal = attackers_to_color(pos, mem, ksq, them, pos.occupied) == 0ULL;
-
-    unmake_move(pos, m, mem.tables, st);
-    return legal;
-}
-
-inline bool legal_fast_impl(
-    Position& pos,
-    const memory::Memory& mem,
-    const GenInfo& info,
-    Move m
-) noexcept {
-    if (move_is_none(m))
-        return false;
-
-    const Square from = from_sq(m);
-    const Piece moving = piece_on(pos, from);
-    if (moving == PIECE_NONE)
-        return false;
-
-    if (type_of(moving) == KING)
-        return true;
-
-    if (move_is_ep(m))
-        return legal_slow(pos, mem, m);
-
-    if ((info.pinned & bb_of(from)) == 0ULL)
-        return true;
-
-    return (line_bb(mem, info.king_sq, from) & bb_of(to_sq(m))) != 0ULL;
-}
-
-inline bool needs_legal_filter(
-    const Position&,
-    const GenInfo& info,
-    Move m
-) noexcept {
-    if (move_is_none(m) || move_is_ep(m))
-        return true;
-
-    const Square from = from_sq(m);
-    return from == info.king_sq || (info.pinned & bb_of(from)) != 0ULL;
-}
-
 inline Move* generate_non_evasions_with_info(
     const Position& pos,
     const memory::Memory& mem,
@@ -1122,154 +1308,22 @@ inline Move* generate_pseudo_legal_with_info(
 
 } // namespace
 
-Bitboard attackers_to_color(
-    const Position& pos,
-    const memory::Memory& mem,
-    Square sq,
-    Color by,
-    Bitboard occupied
-) noexcept {
-    Bitboard attackers = 0ULL;
-
-    const Bitboard pawns   = pieces_bb(pos, by, PAWN);
-    const Bitboard knights = pieces_bb(pos, by, KNIGHT);
-    const Bitboard bishops = pieces_bb(pos, by, BISHOP);
-    const Bitboard rooks   = pieces_bb(pos, by, ROOK);
-    const Bitboard queens  = pieces_bb(pos, by, QUEEN);
-    const Bitboard kings   = pieces_bb(pos, by, KING);
-
-    attackers |= pawn_attacks(mem, opposite(by), sq) & pawns;
-    attackers |= knight_attacks(mem, sq) & knights;
-    attackers |= king_attacks(mem, sq) & kings;
-    attackers |= bishop_attacks_fast(mem, sq, occupied) & (bishops | queens);
-    attackers |= rook_attacks_fast(mem, sq, occupied) & (rooks | queens);
-
-    return attackers;
-}
-
-Bitboard attackers_to(
-    const Position& pos,
-    const memory::Memory& mem,
-    Square sq,
-    Bitboard occupied
-) noexcept {
-    return attackers_to_color(pos, mem, sq, WHITE, occupied)
-         | attackers_to_color(pos, mem, sq, BLACK, occupied);
-}
-
-Bitboard checkers_bb(
-    const Position& pos,
-    const memory::Memory& mem,
-    Color us
-) noexcept {
-    // Squares attacking our king determine whether we are in check and how
-    // evasions must be constrained.
-    const Color them = opposite(us);
-    return attackers_to_color(pos, mem, pos.king_sq[us], them, pos.occupied);
-}
-
-Bitboard pinners_bb(
-    const Position& pos,
-    const memory::Memory& mem,
-    Color us
-) noexcept {
-    Bitboard pinners = 0ULL;
-    Bitboard pinned = 0ULL;
-    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
-    return pinners;
-}
-
-Bitboard pinned_bb(
-    const Position& pos,
-    const memory::Memory& mem,
-    Color us
-) noexcept {
-    Bitboard pinners = 0ULL;
-    Bitboard pinned = 0ULL;
-    compute_pinners_and_pinned(pos, mem, us, pinners, pinned);
-    return pinned;
-}
-
-Bitboard danger_bb(
-    const Position& pos,
-    const memory::Memory& mem,
-    Color by
-) noexcept {
-    const Color us = opposite(by);
-    const Bitboard occupied = pos.occupied ^ bb_of(pos.king_sq[us]);
-    return attacks_by_color_on_occ(pos, mem, by, occupied);
-}
-
-/*
- * 著法生成實作
- * init_gen_info() — 初始化生成上下文（將軍檢測/釘子/攻擊遮罩）
- * generate_pseudo_captures/quiets() — 生成偽合法捕獲/安靜著法
- * generate_legal() — 生成完整合法著法列表
- * legal/legal_fast/pseudo_legal() — 著法合法性驗證
- * move_gives_check() — 檢測著法是否將軍
- * attackers_to/checkers_bb/pinned_bb() — 攻擊/將軍/釘子檢測
- */
-void init_gen_info(
-    GenInfo& info,
-    const Position& pos,
-    const memory::Memory& mem
-) noexcept {
-    info.us   = static_cast<Color>(pos.side_to_move);
-    info.them = opposite(info.us);
-
-    info.king_sq = pos.king_sq[info.us];
-    info.ep_sq   = pos.ep_sq;
-
-    info.occupied = pos.occupied;
-    info.us_occ   = pos.color_bb[info.us];
-    info.them_occ = pos.color_bb[info.them];
-
-    info.checkers = checkers_bb(pos, mem, info.us);
-    compute_pinners_and_pinned(pos, mem, info.us, info.pinners, info.pinned);
-    info.danger = 0ULL;
-
-    info.in_check     = info.checkers != 0;
-    info.double_check = more_than_one(info.checkers);
-
-    if (!info.in_check) {
-        info.capture_mask = info.them_occ;
-        info.push_mask    = ~info.occupied;
-        return;
-    }
-
-    if (info.double_check) {
-        info.capture_mask = 0ULL;
-        info.push_mask    = 0ULL;
-        return;
-    }
-
-    const Square checker_sq = lsb_sq(info.checkers);
-    const Bitboard checker_mask = bb_of(checker_sq);
-
-    const Bitboard slider_checkers =
-        diag_sliders_bb(pos, info.them) | ortho_sliders_bb(pos, info.them);
-
-    info.capture_mask = checker_mask;
-    info.push_mask =
-        (checker_mask & slider_checkers)
-            ? between_bb(mem, info.king_sq, checker_sq)
-            : 0ULL;
-}
+namespace {
 
 [[nodiscard]] inline bool pseudo_legal_castle_fast(
     const Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
     if (info.in_check)
         return false;
 
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
 
     if (info.us == WHITE) {
-        if (move_flag(m) == MOVE_OO) {
+        if (move_flag(move) == MOVE_OO) {
             return from == 4 &&
                 to == 6 &&
                 piece_on(pos, 4) == W_KING &&
@@ -1280,7 +1334,7 @@ void init_gen_info(
                 !square_attacked_by_them(pos, mem, info, 6);
         }
 
-        if (move_flag(m) == MOVE_OOO) {
+        if (move_flag(move) == MOVE_OOO) {
             return from == 4 &&
                 to == 2 &&
                 piece_on(pos, 4) == W_KING &&
@@ -1294,7 +1348,7 @@ void init_gen_info(
         return false;
     }
 
-    if (move_flag(m) == MOVE_OO) {
+    if (move_flag(move) == MOVE_OO) {
         return from == 60 &&
             to == 62 &&
             piece_on(pos, 60) == B_KING &&
@@ -1305,7 +1359,7 @@ void init_gen_info(
             !square_attacked_by_them(pos, mem, info, 62);
     }
 
-    if (move_flag(m) == MOVE_OOO) {
+    if (move_flag(move) == MOVE_OOO) {
         return from == 60 &&
             to == 58 &&
             piece_on(pos, 60) == B_KING &&
@@ -1323,17 +1377,17 @@ void init_gen_info(
     const Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
-    if (move_is_castle(m) ||
-        move_is_promotion(m) ||
-        move_is_ep(m) ||
-        move_is_double_push(m)) {
+    if (move_is_castle(move) ||
+        move_is_promotion(move) ||
+        move_is_ep(move) ||
+        move_is_double_push(move)) {
         return false;
     }
 
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     const Bitboard to_bb = bb_of(to);
 
     Bitboard mask = king_attacks(mem, from);
@@ -1344,32 +1398,32 @@ void init_gen_info(
         return false;
 
     const bool capture = (info.them_occ & to_bb) != 0ULL;
-    return capture ? move_flag(m) == MOVE_CAPTURE
-                   : move_flag(m) == MOVE_QUIET;
+    return capture ? move_flag(move) == MOVE_CAPTURE
+                   : move_flag(move) == MOVE_QUIET;
 }
 
 [[nodiscard]] inline bool pseudo_legal_piece_step_fast(
     const Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m,
-    PieceType pt
+    Move move,
+    PieceType piece_type
 ) noexcept {
-    if (move_is_castle(m) ||
-        move_is_promotion(m) ||
-        move_is_ep(m) ||
-        move_is_double_push(m)) {
+    if (move_is_castle(move) ||
+        move_is_promotion(move) ||
+        move_is_ep(move) ||
+        move_is_double_push(move)) {
         return false;
     }
 
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     const Bitboard to_bb = bb_of(to);
     if ((info.us_occ & to_bb) != 0ULL)
         return false;
 
     Bitboard mask = 0ULL;
-    switch (pt) {
+    switch (piece_type) {
         case KNIGHT:
             mask = knight_attacks(mem, from);
             break;
@@ -1398,21 +1452,21 @@ void init_gen_info(
         return false;
 
     const bool capture = (info.them_occ & to_bb) != 0ULL;
-    return capture ? move_flag(m) == MOVE_CAPTURE
-                   : move_flag(m) == MOVE_QUIET;
+    return capture ? move_flag(move) == MOVE_CAPTURE
+                   : move_flag(move) == MOVE_QUIET;
 }
 
 [[nodiscard]] inline bool pseudo_legal_white_pawn_fast(
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     const Bitboard to_bb = bb_of(to);
     const Bitboard pin_mask = pin_mask_for(mem, info, from);
 
-    switch (move_flag(m)) {
+    switch (move_flag(move)) {
         case MOVE_QUIET:
             if (rank_of(from) == 6 || to != from + 8)
                 return false;
@@ -1424,7 +1478,7 @@ void init_gen_info(
                 (info.push_mask & to_bb) != 0ULL &&
                 (pin_mask & to_bb) != 0ULL;
 
-        case MOVE_DOUBLE_PUSH: {
+        case MOVE_DOUBLE_PUSH:
             if (rank_of(from) != 1 || to != from + 16)
                 return false;
             if ((info.occupied & (bb_of(from + 8) | to_bb)) != 0ULL)
@@ -1434,7 +1488,6 @@ void init_gen_info(
             return !info.double_check &&
                 (info.push_mask & to_bb) != 0ULL &&
                 (pin_mask & to_bb) != 0ULL;
-        }
 
         case MOVE_CAPTURE:
             if (rank_of(from) == 6)
@@ -1501,14 +1554,14 @@ void init_gen_info(
 [[nodiscard]] inline bool pseudo_legal_black_pawn_fast(
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     const Bitboard to_bb = bb_of(to);
     const Bitboard pin_mask = pin_mask_for(mem, info, from);
 
-    switch (move_flag(m)) {
+    switch (move_flag(move)) {
         case MOVE_QUIET:
             if (rank_of(from) == 1 || to != from - 8)
                 return false;
@@ -1520,7 +1573,7 @@ void init_gen_info(
                 (info.push_mask & to_bb) != 0ULL &&
                 (pin_mask & to_bb) != 0ULL;
 
-        case MOVE_DOUBLE_PUSH: {
+        case MOVE_DOUBLE_PUSH:
             if (rank_of(from) != 6 || to != from - 16)
                 return false;
             if ((info.occupied & (bb_of(from - 8) | to_bb)) != 0ULL)
@@ -1530,7 +1583,6 @@ void init_gen_info(
             return !info.double_check &&
                 (info.push_mask & to_bb) != 0ULL &&
                 (pin_mask & to_bb) != 0ULL;
-        }
 
         case MOVE_CAPTURE:
             if (rank_of(from) == 1)
@@ -1594,27 +1646,29 @@ void init_gen_info(
     }
 }
 
+} // namespace
+
 bool pseudo_legal(
     const Position& pos,
     const memory::Memory& mem,
-    Move m
+    Move move
 ) noexcept {
     GenInfo info{};
     init_gen_info(info, pos, mem);
-    return pseudo_legal_fast(pos, mem, info, m);
+    return pseudo_legal_fast(pos, mem, info, move);
 }
 
 bool pseudo_legal_fast(
     const Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
-    if (move_is_none(m))
+    if (move_is_none(move))
         return false;
 
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     if (!is_ok(from) || !is_ok(to))
         return false;
 
@@ -1624,22 +1678,26 @@ bool pseudo_legal_fast(
 
     switch (type_of(moving)) {
         case KING:
-            return move_is_castle(m)
-                ? pseudo_legal_castle_fast(pos, mem, info, m)
-                : pseudo_legal_king_step_fast(pos, mem, info, m);
+            return move_is_castle(move)
+                ? pseudo_legal_castle_fast(pos, mem, info, move)
+                : pseudo_legal_king_step_fast(pos, mem, info, move);
 
         case KNIGHT:
         case BISHOP:
         case ROOK:
         case QUEEN:
             return pseudo_legal_piece_step_fast(
-                pos, mem, info, m, type_of(moving)
+                pos,
+                mem,
+                info,
+                move,
+                type_of(moving)
             );
 
         case PAWN:
             return info.us == WHITE
-                ? pseudo_legal_white_pawn_fast(mem, info, m)
-                : pseudo_legal_black_pawn_fast(mem, info, m);
+                ? pseudo_legal_white_pawn_fast(mem, info, move)
+                : pseudo_legal_black_pawn_fast(mem, info, move);
 
         default:
             return false;
@@ -1649,40 +1707,40 @@ bool pseudo_legal_fast(
 bool legal(
     Position& pos,
     const memory::Memory& mem,
-    Move m
+    Move move
 ) noexcept {
-    return legal_slow(pos, mem, m);
+    return legal_slow(pos, mem, move);
 }
 
 bool legal(
     const Position& pos,
     const memory::Memory& mem,
-    Move m
+    Move move
 ) noexcept {
     Position work{};
     position_copy_without_accumulators(work, pos);
-    return legal(work, mem, m);
+    return legal(work, mem, move);
 }
 
 bool legal_fast(
     Position& pos,
     const memory::Memory& mem,
     const GenInfo& info,
-    Move m
+    Move move
 ) noexcept {
-    return legal_fast_impl(pos, mem, info, m);
+    return legal_fast_impl(pos, mem, info, move);
 }
 
 bool move_gives_check(
     const Position& pos,
     const memory::Memory& mem,
-    Move m
+    Move move
 ) noexcept {
-    if (move_is_none(m))
+    if (move_is_none(move))
         return false;
 
-    const Square from = from_sq(m);
-    const Square to = to_sq(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
     if (!is_ok(from) || !is_ok(to))
         return false;
 
@@ -1700,8 +1758,8 @@ bool move_gives_check(
     Bitboard pawns = pieces_bb(pos, us, PAWN);
     Bitboard knights = pieces_bb(pos, us, KNIGHT);
     Bitboard kings = pieces_bb(pos, us, KING);
-    Bitboard bishop_like = diag_sliders_bb(pos, us);
-    Bitboard rook_like = ortho_sliders_bb(pos, us);
+    Bitboard bishop_like = diagonal_sliders(pos, us);
+    Bitboard rook_like = orthogonal_sliders(pos, us);
 
     const Bitboard from_bb = bb_of(from);
     const Bitboard to_bb = bb_of(to);
@@ -1733,18 +1791,18 @@ bool move_gives_check(
             return false;
     }
 
-    if (move_flag(m) == MOVE_OO || move_flag(m) == MOVE_OOO) {
+    if (move_flag(move) == MOVE_OO || move_flag(move) == MOVE_OOO) {
         occupied |= to_bb;
         kings |= to_bb;
 
         const Square rook_from =
             us == WHITE
-                ? (move_flag(m) == MOVE_OO ? 7 : 0)
-                : (move_flag(m) == MOVE_OO ? 63 : 56);
+                ? (move_flag(move) == MOVE_OO ? 7 : 0)
+                : (move_flag(move) == MOVE_OO ? 63 : 56);
         const Square rook_to =
             us == WHITE
-                ? (move_flag(m) == MOVE_OO ? 5 : 3)
-                : (move_flag(m) == MOVE_OO ? 61 : 59);
+                ? (move_flag(move) == MOVE_OO ? 5 : 3)
+                : (move_flag(move) == MOVE_OO ? 61 : 59);
         const Bitboard rook_from_bb = bb_of(rook_from);
         const Bitboard rook_to_bb = bb_of(rook_to);
 
@@ -1752,15 +1810,15 @@ bool move_gives_check(
         occupied |= rook_to_bb;
         rook_like ^= rook_from_bb;
         rook_like |= rook_to_bb;
-    } else if (move_is_ep(m)) {
-        const Square cap_sq = us == WHITE ? to - 8 : to + 8;
-        occupied ^= bb_of(cap_sq);
+    } else if (move_is_ep(move)) {
+        const Square captured_sq = us == WHITE ? to - 8 : to + 8;
+        occupied ^= bb_of(captured_sq);
         occupied |= to_bb;
         pawns |= to_bb;
-    } else if (move_is_promotion(m)) {
+    } else if (move_is_promotion(move)) {
         occupied |= to_bb;
 
-        switch (promo_piece(m)) {
+        switch (promo_piece(move)) {
             case KNIGHT:
                 knights |= to_bb;
                 break;
@@ -1815,7 +1873,7 @@ bool move_gives_check(
 #if MAGNUS_VERIFY_GIVES_CHECK
     Position next{};
     position_copy_without_accumulators(next, pos);
-    do_move_copy(next, m, mem.tables);
+    do_move_copy(next, move, mem.tables);
     const bool slow_gives_check =
         checkers_bb(next, mem, static_cast<Color>(next.side_to_move)) != 0ULL;
     if (gives_check != slow_gives_check)
@@ -1825,6 +1883,11 @@ bool move_gives_check(
     return gives_check;
 }
 
+/*
+ * è‘—æ³•ç”Ÿæˆå¯¦ä½œ
+ * generate_pseudo_captures/quiets() â€” ç”Ÿæˆå½åˆæ³•æ•ç²/å®‰éœè‘—æ³•
+ * generate_legal() â€” ç”Ÿæˆå®Œæ•´åˆæ³•è‘—æ³•åˆ—è¡¨
+ */
 Move* generate_captures(
     Position& pos,
     const memory::Memory& mem,

@@ -2,53 +2,85 @@ CXX := g++
 CC := gcc
 TARGET := MagnusChess
 
+BUILD_PROFILE ?= auto
 BUILD_DIR := build
-OBJ_DIR := $(BUILD_DIR)/obj
-BIN_DIR := bin
-PGO_DIR := $(BUILD_DIR)/pgo
+TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
+X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
+
+ifeq ($(X86_64_TARGET),)
+  $(error MagnusChess 64-bit profiles require an x86_64 compiler target; got '$(TARGET_TRIPLE)')
+endif
+
+ifeq ($(BUILD_PROFILE),auto)
+  EFFECTIVE_PROFILE := native64
+else ifeq ($(BUILD_PROFILE),portable64)
+  EFFECTIVE_PROFILE := portable64
+else ifeq ($(BUILD_PROFILE),native64)
+  EFFECTIVE_PROFILE := native64
+else
+  $(error Unknown BUILD_PROFILE '$(BUILD_PROFILE)'; use auto, portable64, or native64)
+endif
+
+OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)
+PGO_DIR := $(BUILD_DIR)/pgo/$(EFFECTIVE_PROFILE)
 PGO_BENCH_LOG := $(PGO_DIR)/bench.log
 PGO_BENCH_ARGS ?= bench
 
 SRC := \
-	Attack.cpp \
+	board/Attack.cpp \
 	Bench.cpp \
 	Evaluation.cpp \
 	History.cpp \
 	Lmr.cpp \
 	Main.cpp \
 	MovePicker.cpp \
-	MoveGen.cpp \
+	board/MoveGen.cpp \
 	Nmp.cpp \
 	Nnue.cpp \
 	PerftMoveGen.cpp \
 	Perft.cpp \
 	PerftPosition.cpp \
-	Position.cpp \
+	board/Position.cpp \
 	Search.cpp \
 	See.cpp \
-	Syzygy.cpp \
+	syzygy/Syzygy.cpp \
 	Time.cpp \
 	TT.cpp \
 	Uci.cpp \
-	Mnue.cpp
+	mnue/Mnue.cpp
 
 FATHOM_DIR := ../third_party/fathom
 FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ)
 DEP := $(OBJ:.o=.d)
+MODULE_OBJ_DIRS := \
+	$(OBJ_DIR)/board \
+	$(OBJ_DIR)/mnue \
+	$(OBJ_DIR)/syzygy
 PERFT_CORE_OBJ := \
 	$(OBJ_DIR)/PerftMoveGen.o \
 	$(OBJ_DIR)/PerftPosition.o
 
-ARCH_FLAGS := \
+PORTABLE64_FLAGS := \
 	-m64 \
-	-mavx2 \
-	-mbmi \
-	-mbmi2 \
-	-mpopcnt \
-	-mlzcnt \
+	-march=x86-64 \
+	-mtune=generic
+
+NATIVE64_FLAGS := \
+	-m64 \
+	-march=native \
 	-mtune=native
+
+ifeq ($(EFFECTIVE_PROFILE),portable64)
+	ARCH_FLAGS := $(PORTABLE64_FLAGS)
+	PROFILE_CPPFLAGS := -DMAGNUS_DISABLE_PEXT=1
+	FATHOM_PROFILE_FLAGS := -DTB_NO_HW_POP_COUNT=1
+else
+	ARCH_FLAGS := $(NATIVE64_FLAGS)
+	PROFILE_CPPFLAGS :=
+	FATHOM_PROFILE_FLAGS :=
+endif
 
 OPT_FLAGS := \
 	-Ofast \
@@ -95,7 +127,7 @@ WARN_FLAGS := \
 	-Wno-unused-parameter \
 	-Wno-sign-conversion
 
-CPPFLAGS := -MMD -MP -I$(FATHOM_DIR)
+CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS)
 
 BASE_CXXFLAGS := \
 	-std=c++20 \
@@ -111,6 +143,7 @@ FATHOM_CFLAGS := \
 	$(ARCH_FLAGS) \
 	-O3 \
 	-DNDEBUG \
+	$(FATHOM_PROFILE_FLAGS) \
 	-I$(FATHOM_DIR)
 
 LINK_OPT_LEVEL ?= 3
@@ -161,9 +194,15 @@ else
 	RMDIR_R = rm -rf "$(1)"
 endif
 
-OUTPUT := $(BIN_DIR)/$(TARGET)$(EXEEXT)
-PROFGEN_OUTPUT := $(BIN_DIR)/$(TARGET)_profgen$(EXEEXT)
-PGO_OUTPUT := $(BIN_DIR)/$(TARGET)_pgo$(EXEEXT)
+ifeq ($(BUILD_PROFILE),auto)
+	OUTPUT_BASENAME := $(TARGET)
+else
+	OUTPUT_BASENAME := $(TARGET)-$(EFFECTIVE_PROFILE)
+endif
+
+OUTPUT := $(BUILD_DIR)/$(OUTPUT_BASENAME)$(EXEEXT)
+PROFGEN_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-profgen$(EXEEXT)
+PGO_OUTPUT := $(BUILD_DIR)/$(TARGET)-$(EFFECTIVE_PROFILE)-pgo$(EXEEXT)
 
 ifeq ($(OS),Windows_NT)
 	RUN_CMD = .\$(call fixpath,$(OUTPUT))
@@ -177,24 +216,43 @@ else
 	PGO_BENCH_LOG_CMD = $(PGO_BENCH_LOG)
 endif
 
-.PHONY: all build release releases \
+.PHONY: all auto portable64 native64 variants detect build release releases \
 	pgo profile-build pgo-step1 pgo-step2 pgo-step3 \
 	pgo-generate-build pgo-use-build run \
 	clean objclean pgo-clean distclean
 
-all: build
+all: auto
+auto: build
+
+portable64:
+	@$(MAKE) --no-print-directory BUILD_PROFILE=portable64 build
+
+native64:
+	@$(MAKE) --no-print-directory BUILD_PROFILE=native64 build
+
+variants: portable64 native64
+
+detect:
+	@echo Compiler target : $(TARGET_TRIPLE)
+	@echo Requested profile: $(BUILD_PROFILE)
+	@echo Selected profile : $(EFFECTIVE_PROFILE)
+	@echo CPU flags        : $(ARCH_FLAGS)
+	@echo Output           : $(OUTPUT)
+
 build: $(OUTPUT)
 release: build
 releases: build
 
-$(OUTPUT): $(OBJ) | $(BIN_DIR)
+$(OUTPUT): $(OBJ)
 	$(CXX) $(OBJ) -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
 
-$(PROFGEN_OUTPUT): $(OBJ) | $(BIN_DIR)
+$(PROFGEN_OUTPUT): $(OBJ)
 	$(CXX) $(OBJ) -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
 
-$(PGO_OUTPUT): $(OBJ) | $(BIN_DIR)
+$(PGO_OUTPUT): $(OBJ)
 	$(CXX) $(OBJ) -o $@ $(BASE_LDFLAGS) $(PGO_LDFLAGS) $(LDLIBS)
+
+$(OBJ): | $(MODULE_OBJ_DIRS)
 
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
@@ -215,7 +273,7 @@ $(FATHOM_OBJ): \
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)
 
-$(BIN_DIR):
+$(MODULE_OBJ_DIRS): | $(OBJ_DIR)
 	$(call MKDIR_P,$@)
 
 $(PGO_DIR):
@@ -264,13 +322,16 @@ pgo-clean:
 	$(call RMDIR_R,$(PGO_DIR))
 
 clean:
-	$(call RMDIR_R,$(OBJ_DIR))
-	$(call RM_F,$(OUTPUT))
-	$(call RM_F,$(PROFGEN_OUTPUT))
-	$(call RM_F,$(PGO_OUTPUT))
+	$(call RMDIR_R,$(BUILD_DIR)/obj)
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-portable64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-native64$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-portable64-profgen$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-native64-profgen$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-portable64-pgo$(EXEEXT))
+	$(call RM_F,$(BUILD_DIR)/$(TARGET)-native64-pgo$(EXEEXT))
 
 distclean: clean
-	$(call RMDIR_R,$(PGO_DIR))
-	$(call RMDIR_R,$(BUILD_DIR))
+	$(call RMDIR_R,$(BUILD_DIR)/pgo)
 
 -include $(DEP)

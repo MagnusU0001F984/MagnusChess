@@ -1,6 +1,8 @@
 #include "PerftPosition.h"
 
-#include "MoveGen.h"
+#include "board/MoveGen.h"
+#include "board/Position.h"
+
 
 namespace magnus::perft_detail {
 namespace {

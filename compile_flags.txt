@@ -1,8 +1,11 @@
 -std=gnu++20
 -xc++
 -I.
+-iquotesrc
 -D_DEBUG
 -DUNICODE
 -D_UNICODE
--D__AVX2__
--D__BMI2__
+-m64
+-march=x86-64
+-mtune=generic
+-DMAGNUS_DISABLE_PEXT=1

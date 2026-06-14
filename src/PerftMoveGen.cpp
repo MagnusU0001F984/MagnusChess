@@ -1,7 +1,7 @@
 #include "PerftMoveGen.h"
 
-#include "Attack.h"
-#include "MoveGen.h"
+#include "board/Attack.h"
+#include "board/MoveGen.h"
 
 #include <bit>
 

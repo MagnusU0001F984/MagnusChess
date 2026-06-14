@@ -22,11 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include "Attack.h"
+#include "board/Attack.h"
+#include "board/Position.h"
 #include "Perft.h"
 #include "PerftMoveGen.h"
 #include "PerftPosition.h"
-#include "MoveGen.h"
+#include "board/MoveGen.h"
 
 #include <algorithm>
 #include <atomic>

@@ -39,12 +39,15 @@ SOFTWARE.
 #include "History.h"
 #include "Lmr.h"
 #include "MovePicker.h"
-#include "MoveGen.h"
+#include "board/MoveGen.h"
+
+
+#include "board/Position.h"
 #include "Nmp.h"
 #include "Nnue.h"
-#include "Mnue.h"
+#include "mnue/Mnue.h"
 #include "See.h"
-#include "Syzygy.h"
+#include "syzygy/Syzygy.h"
 
 /*
  * MagnusChess 搜尋引擎核心 — Search Engine Core

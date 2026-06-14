@@ -39,15 +39,17 @@ SOFTWARE.
 #include <thread>
 #include <vector>
 
-#include "Attack.h"
+#include "board/Attack.h"
+#include "board/MoveGen.h"
+
 #include "Bench.h"
 #include "Common.h"
 #include "Evaluation.h"
 #include "Memory.h"
-#include "Mnue.h"
+#include "mnue/Mnue.h"
 #include "Nnue.h"
 #include "Search.h"
-#include "Syzygy.h"
+#include "syzygy/Syzygy.h"
 #include "Time.h"
 
 #ifdef _WIN32
@@ -118,11 +120,22 @@ static std::string default_mnue_p2_file() {
         return filename;
 
     // 2. Relative to executable directory.
-    const std::string& exe_dir = get_executable_dir();
-    for (const char* subdir : {"", "/bin/", "/../", "/../../", "/../bin/", "/../../bin/"}) {
-        const std::string candidate = exe_dir + subdir + filename;
+    const std::filesystem::path exe_dir = get_executable_dir();
+    const std::filesystem::path exe_parent = exe_dir.parent_path();
+    const std::filesystem::path search_dirs[] = {
+        exe_dir,
+        exe_dir / "build",
+        exe_parent,
+        exe_parent.parent_path(),
+        exe_parent / "build",
+        exe_parent.parent_path() / "build"
+    };
+
+    for (const std::filesystem::path& dir : search_dirs) {
+        const std::filesystem::path candidate =
+            (dir / filename).lexically_normal();
         if (std::filesystem::exists(candidate, ec) && !ec)
-            return candidate;
+            return candidate.string();
     }
 
     // 3. Give up — fall back to the original filename so the error message
@@ -177,11 +190,11 @@ inline void push_position_history(
 }
 
 [[nodiscard]] constexpr const char* perft_usage_hint() noexcept {
-    return "perft <depth> <threads>";
+    return "perft <depth> <threads> [auto|pext|magic|table|classical]";
 }
 
 [[nodiscard]] constexpr const char* divide_usage_hint() noexcept {
-    return "divide <depth> <threads> [live]";
+    return "divide <depth> <threads> [live] [auto|pext|magic|table|classical]";
 }
 
 [[nodiscard]] constexpr const char* bench_usage_hint() noexcept {
@@ -820,7 +833,8 @@ enum class DisplayScoreModel {
     std::string_view command,
     int& depth,
     std::size_t& threads,
-    bool& live
+    bool& live,
+    std::string& backend
 ) noexcept {
     std::istringstream iss{std::string(command)};
     std::string token;
@@ -829,6 +843,7 @@ enum class DisplayScoreModel {
     depth = -1;
     threads = 0;
     live = false;
+    backend = "auto";
 
     iss >> token; // divide
 
@@ -847,11 +862,18 @@ enum class DisplayScoreModel {
 
     threads = static_cast<std::size_t>(parsed_threads);
 
-    if (iss >> value) {
-        if (value == "live")
+    bool live_seen = false;
+    bool backend_seen = false;
+    while (iss >> value) {
+        if (value == "live" && !live_seen) {
             live = true;
-        else
+            live_seen = true;
+        } else if (!backend_seen) {
+            backend = value;
+            backend_seen = true;
+        } else {
             return false;
+        }
     }
 
     return true;
@@ -951,7 +973,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess\U0001F984 2.4.102 by the Magnus developer ";
+        out << "MagnusChess 2.4.111 by the Magnus developer ";
         if (is_beta) {
             out << "& This is a beta version";
         }
@@ -959,7 +981,7 @@ struct UciSession {
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 2.4.102 ";
+        out << "id name MagnusChess 2.4.111 ";
         
         if(is_beta) {
             out << "for Beta Testing";
@@ -967,7 +989,7 @@ struct UciSession {
         
         out << '\n';
 
-        out << "id author Magnus\U0001F984(gitvalerain@gmail.com)\n";
+        out << "id author Magnus(gitvalerain@gmail.com)\n";
         out << "option name Hash type spin default " << DEFAULT_UCI_HASH_MB
             << " min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
@@ -1196,12 +1218,13 @@ struct UciSession {
         }
         else if (name == "MNUEfile") {
             if (!value.empty()) {
+                const std::string resolved = resolve_file_path(value);
                 std::error_code ec;
-                if (!std::filesystem::exists(value, ec) || ec) {
+                if (!std::filesystem::exists(resolved, ec) || ec) {
                     out << "info string MNUEfile not found: " << value << '\n';
                     return;
                 }
-                eval_file_p2 = value;
+                eval_file_p2 = resolved;
                 memory::memory_clear_hash(mem);
 
                 if (use_nnue && !ensure_eval_loaded(&out))
@@ -1570,7 +1593,9 @@ struct UciSession {
         }
 
         if (mnue_active()){
-            std :: cout << "info string MNUE evaluation using " << mnue_name() << "(20.1 MB, (1,32,16,1024,10240))\n";
+            std :: cout << "info string MNUE evaluation using " << mnue_name()
+                       << " (20.1 MB, (1,32,16,1024,10240), "
+                       << mnue::eval_simd_name() << ")\n";
         }
 
         limits.contempt = contempt;
@@ -1626,8 +1651,16 @@ struct UciSession {
         int depth = -1;
         std::size_t perft_threads = 0;
         bool live = false;
-        if (!parse_divide_command(line, depth, perft_threads, live)) {
-            out << divide_usage_hint() << '\n';
+        std::string backend;
+        if (!parse_divide_command(
+                line,
+                depth,
+                perft_threads,
+                live,
+                backend
+            )
+            || !attack_select_backend(backend)) {
+            out << "info string usage: " << perft_usage_hint() << '\n';
             return;
         }
 
@@ -1690,9 +1723,10 @@ struct UciSession {
                 return true;
             }
 
-            if (mnue::load_p2(path)) {
+            const std::string resolved = resolve_file_path(path);
+            if (mnue::load_p2(resolved)) {
                 memory::memory_clear_hash(mem);
-                out << "info string loaded mnue p2 " << path << '\n';
+                out << "info string loaded mnue p2 " << resolved << '\n';
             } else {
                 out << "info string failed to load mnue p2: " << mnue::last_error() << '\n';
             }

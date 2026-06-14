@@ -30,8 +30,11 @@ SOFTWARE.
 
 #pragma once
 
-#include "Position.h"
 #include "Types.h"
+
+namespace magnus {
+struct Position;
+}
 
 namespace magnus::eval {
 
