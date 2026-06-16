@@ -30,7 +30,11 @@ SOFTWARE.
 #include <string>
 
 #include "Nnue.h"
-#include "Position.h"
+#include "Types.h"
+
+namespace magnus {
+struct Position;
+}
 
 namespace magnus::mnue {
 
@@ -108,6 +112,7 @@ void unload_all() noexcept;
 [[nodiscard]] const std::string& p2_path() noexcept;
 [[nodiscard]] const std::string& p4_path() noexcept;
 [[nodiscard]] const std::string& last_error() noexcept;
+[[nodiscard]] const char* eval_simd_name() noexcept;
 
 // P2 is the base evaluator. P4 is intentionally lazy and should only be used
 // from selected search nodes; it is not written into TT raw eval in the first

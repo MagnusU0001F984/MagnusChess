@@ -31,6 +31,7 @@ black pieces reuse the same values by flipping squares vertically with sq ^ 56.
 */
 
 #include "Evaluation.h"
+#include "board/Position.h"
 
 #include <array>
 

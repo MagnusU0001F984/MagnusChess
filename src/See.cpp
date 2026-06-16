@@ -26,7 +26,9 @@ SOFTWARE.
 
 #include <algorithm>
 
-#include "Attack.h"
+#include "board/Attack.h"
+#include "board/MoveGen.h"
+#include "board/Position.h"
 
 /*
  * SEE (靜態交換評估) 實作 — Static Exchange Evaluation

@@ -28,19 +28,19 @@ jobs:
           lscpu | grep -E 'Model name|CPU\(s\)|Thread|Core|Architecture' || true
           free -h
 
-      - name: Build
+      - name: Build portable x86-64
         working-directory: ./src
-        run: make -j"$(nproc)"
+        run: make portable64 -j"$(nproc)"
 
       - name: Smoke test
         working-directory: ./src
         run: |
-          echo "uci" | timeout 5s ./bin/MagnusChess || true
+          echo "uci" | timeout 5s ./build/MagnusChess-portable64 || true
 
       - name: Package binary
         run: |
           mkdir -p dist
-          cp src/bin/MagnusChess dist/
+          cp src/build/MagnusChess-portable64 dist/MagnusChess
           tar -czf MagnusChess-linux.tar.gz -C dist MagnusChess
 
       - name: Upload binary artifact

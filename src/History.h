@@ -36,8 +36,8 @@ SOFTWARE.
 #include <cstdlib>
 
 #include "HistoryContext.h"
-#include "MoveGen.h"
-#include "Position.h"
+#include "board/MoveGen.h"
+#include "board/Position.h"
 #include "Search.h"
 #include "Types.h"
 

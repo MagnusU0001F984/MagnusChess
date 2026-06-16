@@ -24,9 +24,12 @@ SOFTWARE.
 
 #pragma once
 
-#include "Position.h"
 #include "Search.h"
 #include "Types.h"
+
+namespace magnus {
+struct Position;
+}
 
 /*
  * 時間管理模組 — Time Manager

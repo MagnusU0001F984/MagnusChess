@@ -36,7 +36,10 @@ SOFTWARE.
 #include <string>
 
 #include "Memory.h"
-#include "Position.h"
+
+namespace magnus {
+struct Position;
+}
 
 namespace magnus {
 

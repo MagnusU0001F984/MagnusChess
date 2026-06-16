@@ -33,8 +33,9 @@ SOFTWARE.
 #include <cstdint>
 
 #include "History.h"
-#include "MoveGen.h"
-#include "Position.h"
+#include "board/MoveGen.h"
+
+#include "board/Position.h"
 
 namespace magnus::search {
 

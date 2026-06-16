@@ -120,85 +120,6 @@ inline void remove_piece_from_caches(
     refresh_material_signature(pos, color, piece_type);
 }
 
-/*
-These helpers keep the incremental Zobrist key maintenance localized. The
-plain board mutators stay oblivious to hashing, while the keyed copy-make path
-can layer hash updates on top of the same structural operations.
-*/
-inline void key_xor_piece(
-    Position& pos,
-    const Tables& tables,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept {
-    pos.key ^= tables.zobrist.piece[color][piece_type][sq];
-}
-
-inline void key_xor_castling(Position& pos, const Tables& tables) noexcept {
-    pos.key ^= tables.zobrist.castling[pos.castling_rights];
-}
-
-inline void key_xor_ep(Position& pos, const Tables& tables) noexcept {
-    if (has_ep(pos))
-        pos.key ^= tables.zobrist.ep_file[file_of(pos.ep_sq)];
-}
-
-inline void clear_castling_rights_by_square(Position& pos, Square sq) noexcept {
-    switch (sq) {
-        case 0:  pos.castling_rights &= ~WHITE_OOO; break;
-        case 7:  pos.castling_rights &= ~WHITE_OO;  break;
-        case 56: pos.castling_rights &= ~BLACK_OOO; break;
-        case 63: pos.castling_rights &= ~BLACK_OO;  break;
-        default: break;
-    }
-}
-
-inline void remove_piece_at(Position& pos, Square sq) noexcept {
-    const Piece pc = piece_on(pos, sq);
-    if (pc == PIECE_NONE) return;
-
-    position_remove_piece(pos, color_of(pc), type_of(pc), sq);
-}
-
-inline void remove_piece_at(
-    Position& pos,
-    const Tables& tables,
-    Square sq
-) noexcept {
-    const Piece pc = piece_on(pos, sq);
-    if (pc == PIECE_NONE) return;
-
-    const Color color = color_of(pc);
-    const PieceType piece_type = type_of(pc);
-    key_xor_piece(pos, tables, color, piece_type, sq);
-    position_remove_piece(pos, color, piece_type, sq);
-}
-
-inline void move_piece_with_key(
-    Position& pos,
-    const Tables& tables,
-    Color color,
-    PieceType piece_type,
-    Square from,
-    Square to
-) noexcept {
-    key_xor_piece(pos, tables, color, piece_type, from);
-    key_xor_piece(pos, tables, color, piece_type, to);
-    position_move_piece(pos, color, piece_type, from, to);
-}
-
-inline void put_piece_with_key(
-    Position& pos,
-    const Tables& tables,
-    Color color,
-    PieceType piece_type,
-    Square sq
-) noexcept {
-    key_xor_piece(pos, tables, color, piece_type, sq);
-    position_put_piece(pos, color, piece_type, sq);
-}
-
 } // namespace
 
 /*
@@ -398,93 +319,111 @@ void position_move_piece(
         pos.king_sq[color] = to;
 }
 
-bool position_has_valid_kings(const Position& pos) noexcept {
-    const Bitboard wk = pos.color_bb[WHITE] & pos.piece_bb[KING];
-    const Bitboard bk = pos.color_bb[BLACK] & pos.piece_bb[KING];
-    return std::popcount(wk) == 1 && std::popcount(bk) == 1;
+namespace {
+
+inline void key_xor_piece(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    pos.key ^= tables.zobrist.piece[color][piece_type][sq];
 }
 
-bool position_board_matches_bitboards(const Position& pos) noexcept {
-    Bitboard color_occ[COLOR_NB]{};
-    Bitboard piece_occ[PIECE_NB]{};
-    std::array<std::array<u8, PIECE_NB>, COLOR_NB> piece_counts{};
-
-    for (int sq = 0; sq < SQ_NB; ++sq) {
-        const Piece pc = static_cast<Piece>(pos.board[sq]);
-        if (pc == PIECE_NONE) continue;
-
-        const Color c = color_of(pc);
-        const PieceType pt = type_of(pc);
-
-        color_occ[c] |= bb_of(sq);
-        piece_occ[pt] |= bb_of(sq);
-        piece_counts[c][pt] = static_cast<u8>(static_cast<int>(piece_counts[c][pt]) + 1);
-    }
-
-    int expected_non_king_material = 0;
-    int expected_mnue_phase_units = 0;
-    Key expected_material_signature = 0ULL;
-    for (int color = WHITE; color <= BLACK; ++color) {
-        const Color piece_color = static_cast<Color>(color);
-        for (int piece_type = PAWN; piece_type <= KING; ++piece_type) {
-            const PieceType pt = static_cast<PieceType>(piece_type);
-            if (piece_counts[piece_color][pt] != pos.piece_counts[piece_color][pt])
-                return false;
-
-            if (!tracks_material(pt))
-                continue;
-
-            expected_non_king_material +=
-                static_cast<int>(piece_counts[piece_color][pt])
-                * static_cast<int>(kNonKingMaterialWeight[pt]);
-            expected_mnue_phase_units +=
-                static_cast<int>(piece_counts[piece_color][pt])
-                * static_cast<int>(kMnuePhaseWeight[pt]);
-            expected_material_signature |=
-                static_cast<Key>(piece_counts[piece_color][pt])
-                << material_shift(piece_color, pt);
-        }
-    }
-
-    return color_occ[WHITE] == pos.color_bb[WHITE] &&
-           color_occ[BLACK] == pos.color_bb[BLACK] &&
-           piece_occ[PAWN]   == pos.piece_bb[PAWN] &&
-           piece_occ[KNIGHT] == pos.piece_bb[KNIGHT] &&
-           piece_occ[BISHOP] == pos.piece_bb[BISHOP] &&
-           piece_occ[ROOK]   == pos.piece_bb[ROOK] &&
-           piece_occ[QUEEN]  == pos.piece_bb[QUEEN] &&
-           piece_occ[KING]   == pos.piece_bb[KING] &&
-           (pos.color_bb[WHITE] | pos.color_bb[BLACK]) == pos.occupied &&
-           expected_non_king_material == non_king_material(pos) &&
-           expected_mnue_phase_units == mnue_phase_units(pos) &&
-           expected_material_signature == packed_material_signature(pos);
+inline void key_xor_castling(Position& pos, const Tables& tables) noexcept {
+    pos.key ^= tables.zobrist.castling[pos.castling_rights];
 }
+
+inline void key_xor_ep(Position& pos, const Tables& tables) noexcept {
+    if (has_ep(pos))
+        pos.key ^= tables.zobrist.ep_file[file_of(pos.ep_sq)];
+}
+
+inline void clear_castling_rights_by_square(
+    Position& pos,
+    Square sq
+) noexcept {
+    switch (sq) {
+        case 0:  pos.castling_rights &= ~WHITE_OOO; break;
+        case 7:  pos.castling_rights &= ~WHITE_OO;  break;
+        case 56: pos.castling_rights &= ~BLACK_OOO; break;
+        case 63: pos.castling_rights &= ~BLACK_OO;  break;
+        default: break;
+    }
+}
+
+inline void remove_piece_at(Position& pos, Square sq) noexcept {
+    const Piece piece = piece_on(pos, sq);
+    if (piece == PIECE_NONE)
+        return;
+
+    position_remove_piece(pos, color_of(piece), type_of(piece), sq);
+}
+
+inline void remove_piece_at(
+    Position& pos,
+    const Tables& tables,
+    Square sq
+) noexcept {
+    const Piece piece = piece_on(pos, sq);
+    if (piece == PIECE_NONE)
+        return;
+
+    const Color color = color_of(piece);
+    const PieceType piece_type = type_of(piece);
+    key_xor_piece(pos, tables, color, piece_type, sq);
+    position_remove_piece(pos, color, piece_type, sq);
+}
+
+inline void move_piece_with_key(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square from,
+    Square to
+) noexcept {
+    key_xor_piece(pos, tables, color, piece_type, from);
+    key_xor_piece(pos, tables, color, piece_type, to);
+    position_move_piece(pos, color, piece_type, from, to);
+}
+
+inline void put_piece_with_key(
+    Position& pos,
+    const Tables& tables,
+    Color color,
+    PieceType piece_type,
+    Square sq
+) noexcept {
+    key_xor_piece(pos, tables, color, piece_type, sq);
+    position_put_piece(pos, color, piece_type, sq);
+}
+
+} // namespace
 
 void make_move(
     Position& pos,
-    Move m,
+    Move move,
     const Tables& tables,
-    StateInfo& st
+    StateInfo& state
 ) noexcept {
-    st.castling_rights = pos.castling_rights;
-    st.ep_sq = pos.ep_sq;
-    st.halfmove_clock = pos.halfmove_clock;
-    st.fullmove_number = pos.fullmove_number;
-    st.key = pos.key;
-    st.captured = PIECE_NONE;
-    st.captured_sq = NO_SQ;
+    state.castling_rights = pos.castling_rights;
+    state.ep_sq = pos.ep_sq;
+    state.halfmove_clock = pos.halfmove_clock;
+    state.fullmove_number = pos.fullmove_number;
+    state.key = pos.key;
+    state.captured = PIECE_NONE;
+    state.captured_sq = NO_SQ;
 
     const Color us = static_cast<Color>(pos.side_to_move);
     const Color them = static_cast<Color>(us ^ 1);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
+    const u16 flag = move_flag(move);
+    const PieceType piece_type = type_of(piece_on(pos, from));
 
-    const Square from = from_sq(m);
-    const Square to   = to_sq(m);
-    const u16 flag    = move_flag(m);
-
-    const Piece moving = piece_on(pos, from);
-    const PieceType pt = type_of(moving);
-
-    if (pt == PAWN || move_is_capture(m) || move_is_ep(m))
+    if (piece_type == PAWN || move_is_capture(move) || move_is_ep(move))
         pos.halfmove_clock = 0;
     else
         ++pos.halfmove_clock;
@@ -494,15 +433,16 @@ void make_move(
 
     key_xor_castling(pos, tables);
     key_xor_ep(pos, tables);
-
     pos.ep_sq = NO_SQ;
 
     clear_castling_rights_by_square(pos, from);
     clear_castling_rights_by_square(pos, to);
 
-    if (pt == KING) {
-        if (us == WHITE) pos.castling_rights &= ~(WHITE_OO | WHITE_OOO);
-        else             pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
+    if (piece_type == KING) {
+        if (us == WHITE)
+            pos.castling_rights &= ~(WHITE_OO | WHITE_OOO);
+        else
+            pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
     }
 
     if (flag == MOVE_OO) {
@@ -513,8 +453,7 @@ void make_move(
             move_piece_with_key(pos, tables, BLACK, KING, 60, 62);
             move_piece_with_key(pos, tables, BLACK, ROOK, 63, 61);
         }
-    }
-    else if (flag == MOVE_OOO) {
+    } else if (flag == MOVE_OOO) {
         if (us == WHITE) {
             move_piece_with_key(pos, tables, WHITE, KING, 4, 2);
             move_piece_with_key(pos, tables, WHITE, ROOK, 0, 3);
@@ -522,40 +461,36 @@ void make_move(
             move_piece_with_key(pos, tables, BLACK, KING, 60, 58);
             move_piece_with_key(pos, tables, BLACK, ROOK, 56, 59);
         }
-    }
-    else if (flag == MOVE_EP) {
-        const Square cap_sq = (us == WHITE) ? (to - 8) : (to + 8);
-        st.captured_sq = cap_sq;
-        st.captured = piece_on(pos, cap_sq);
-        remove_piece_at(pos, tables, cap_sq);
+    } else if (flag == MOVE_EP) {
+        const Square captured_sq = us == WHITE ? to - 8 : to + 8;
+        state.captured_sq = captured_sq;
+        state.captured = piece_on(pos, captured_sq);
+        remove_piece_at(pos, tables, captured_sq);
         move_piece_with_key(pos, tables, us, PAWN, from, to);
-    }
-    else if (move_is_promotion(m)) {
-        if (move_is_capture(m)) {
-            st.captured_sq = to;
-            st.captured = piece_on(pos, to);
+    } else if (move_is_promotion(move)) {
+        if (move_is_capture(move)) {
+            state.captured_sq = to;
+            state.captured = piece_on(pos, to);
             remove_piece_at(pos, tables, to);
         }
 
         key_xor_piece(pos, tables, us, PAWN, from);
         position_remove_piece(pos, us, PAWN, from);
-        put_piece_with_key(pos, tables, us, promo_piece(m), to);
-    }
-    else {
-        if (move_is_capture(m)) {
-            st.captured_sq = to;
-            st.captured = piece_on(pos, to);
+        put_piece_with_key(pos, tables, us, promo_piece(move), to);
+    } else {
+        if (move_is_capture(move)) {
+            state.captured_sq = to;
+            state.captured = piece_on(pos, to);
             remove_piece_at(pos, tables, to);
         }
 
-        move_piece_with_key(pos, tables, us, pt, from, to);
+        move_piece_with_key(pos, tables, us, piece_type, from, to);
 
         if (flag == MOVE_DOUBLE_PUSH)
-            pos.ep_sq = (us == WHITE) ? (from + 8) : (from - 8);
+            pos.ep_sq = us == WHITE ? from + 8 : from - 8;
     }
 
     pos.side_to_move = them;
-
     key_xor_castling(pos, tables);
     key_xor_ep(pos, tables);
     pos.key ^= tables.zobrist.side;
@@ -563,16 +498,17 @@ void make_move(
 
 void unmake_move(
     Position& pos,
-    Move m,
+    Move move,
     const Tables& tables,
-    const StateInfo& st
+    const StateInfo& state
 ) noexcept {
+    (void)tables;
+
     const Color them = static_cast<Color>(pos.side_to_move);
     const Color us = static_cast<Color>(them ^ 1);
-
-    const Square from = from_sq(m);
-    const Square to   = to_sq(m);
-    const u16 flag    = move_flag(m);
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
+    const u16 flag = move_flag(move);
 
     if (flag == MOVE_OO) {
         if (us == WHITE) {
@@ -582,8 +518,7 @@ void unmake_move(
             position_move_piece(pos, BLACK, KING, 62, 60);
             position_move_piece(pos, BLACK, ROOK, 61, 63);
         }
-    }
-    else if (flag == MOVE_OOO) {
+    } else if (flag == MOVE_OOO) {
         if (us == WHITE) {
             position_move_piece(pos, WHITE, KING, 2, 4);
             position_move_piece(pos, WHITE, ROOK, 3, 0);
@@ -591,69 +526,60 @@ void unmake_move(
             position_move_piece(pos, BLACK, KING, 58, 60);
             position_move_piece(pos, BLACK, ROOK, 59, 56);
         }
-    }
-    else if (flag == MOVE_EP) {
+    } else if (flag == MOVE_EP) {
         position_move_piece(pos, us, PAWN, to, from);
 
-        if (st.captured != PIECE_NONE && st.captured_sq != NO_SQ) {
+        if (state.captured != PIECE_NONE && state.captured_sq != NO_SQ) {
             position_put_piece(
                 pos,
-                color_of(st.captured),
-                type_of(st.captured),
-                st.captured_sq
+                color_of(state.captured),
+                type_of(state.captured),
+                state.captured_sq
             );
         }
-    }
-    else if (move_is_promotion(m)) {
-        const PieceType promo = promo_piece(m);
-        position_remove_piece(pos, us, promo, to);
+    } else if (move_is_promotion(move)) {
+        position_remove_piece(pos, us, promo_piece(move), to);
         position_put_piece(pos, us, PAWN, from);
 
-        if (st.captured != PIECE_NONE && st.captured_sq == to) {
+        if (state.captured != PIECE_NONE && state.captured_sq == to) {
             position_put_piece(
                 pos,
-                color_of(st.captured),
-                type_of(st.captured),
+                color_of(state.captured),
+                type_of(state.captured),
                 to
             );
         }
-    }
-    else {
-        const PieceType pt = piece_type_on(pos, to);
-        position_move_piece(pos, us, pt, to, from);
+    } else {
+        const PieceType piece_type = piece_type_on(pos, to);
+        position_move_piece(pos, us, piece_type, to, from);
 
-        if (st.captured != PIECE_NONE && st.captured_sq == to) {
+        if (state.captured != PIECE_NONE && state.captured_sq == to) {
             position_put_piece(
                 pos,
-                color_of(st.captured),
-                type_of(st.captured),
+                color_of(state.captured),
+                type_of(state.captured),
                 to
             );
         }
     }
 
     pos.side_to_move = us;
-    pos.castling_rights = st.castling_rights;
-    pos.ep_sq = st.ep_sq;
-    pos.halfmove_clock = st.halfmove_clock;
-    pos.fullmove_number = st.fullmove_number;
-    pos.key = st.key;
+    pos.castling_rights = state.castling_rights;
+    pos.ep_sq = state.ep_sq;
+    pos.halfmove_clock = state.halfmove_clock;
+    pos.fullmove_number = state.fullmove_number;
+    pos.key = state.key;
 }
 
-void do_move_copy(Position& pos, Move m) noexcept {
-    // Plain copy-make used by perft and validation paths that do not need the
-    // incremental Zobrist key.
+void do_move_copy(Position& pos, Move move) noexcept {
     const Color us = static_cast<Color>(pos.side_to_move);
-    const Color them = (us == WHITE ? BLACK : WHITE);
+    const Color them = us == WHITE ? BLACK : WHITE;
+    const Square from = from_sq(move);
+    const Square to = to_sq(move);
+    const u16 flag = move_flag(move);
+    const PieceType piece_type = type_of(piece_on(pos, from));
 
-    const Square from = from_sq(m);
-    const Square to   = to_sq(m);
-    const u16 flag    = move_flag(m);
-
-    const Piece moving = piece_on(pos, from);
-    const PieceType pt = type_of(moving);
-
-    if (pt == PAWN || move_is_capture(m) || move_is_ep(m))
+    if (piece_type == PAWN || move_is_capture(move) || move_is_ep(move))
         pos.halfmove_clock = 0;
     else
         ++pos.halfmove_clock;
@@ -662,13 +588,14 @@ void do_move_copy(Position& pos, Move m) noexcept {
         ++pos.fullmove_number;
 
     pos.ep_sq = NO_SQ;
-
     clear_castling_rights_by_square(pos, from);
     clear_castling_rights_by_square(pos, to);
 
-    if (pt == KING) {
-        if (us == WHITE) pos.castling_rights &= ~(WHITE_OO | WHITE_OOO);
-        else             pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
+    if (piece_type == KING) {
+        if (us == WHITE)
+            pos.castling_rights &= ~(WHITE_OO | WHITE_OOO);
+        else
+            pos.castling_rights &= ~(BLACK_OO | BLACK_OOO);
     }
 
     if (flag == MOVE_OO) {
@@ -679,8 +606,7 @@ void do_move_copy(Position& pos, Move m) noexcept {
             position_move_piece(pos, BLACK, KING, 60, 62);
             position_move_piece(pos, BLACK, ROOK, 63, 61);
         }
-    }
-    else if (flag == MOVE_OOO) {
+    } else if (flag == MOVE_OOO) {
         if (us == WHITE) {
             position_move_piece(pos, WHITE, KING, 4, 2);
             position_move_piece(pos, WHITE, ROOK, 0, 3);
@@ -688,36 +614,132 @@ void do_move_copy(Position& pos, Move m) noexcept {
             position_move_piece(pos, BLACK, KING, 60, 58);
             position_move_piece(pos, BLACK, ROOK, 56, 59);
         }
-    }
-    else if (flag == MOVE_EP) {
-        const Square cap_sq = (us == WHITE) ? (to - 8) : (to + 8);
-        remove_piece_at(pos, cap_sq);
+    } else if (flag == MOVE_EP) {
+        const Square captured_sq = us == WHITE ? to - 8 : to + 8;
+        remove_piece_at(pos, captured_sq);
         position_move_piece(pos, us, PAWN, from, to);
-    }
-    else if (move_is_promotion(m)) {
-        if (move_is_capture(m))
+    } else if (move_is_promotion(move)) {
+        if (move_is_capture(move))
             remove_piece_at(pos, to);
 
         position_remove_piece(pos, us, PAWN, from);
-        position_put_piece(pos, us, promo_piece(m), to);
-    }
-    else {
-        if (move_is_capture(m))
+        position_put_piece(pos, us, promo_piece(move), to);
+    } else {
+        if (move_is_capture(move))
             remove_piece_at(pos, to);
 
-        position_move_piece(pos, us, pt, from, to);
+        position_move_piece(pos, us, piece_type, from, to);
 
         if (flag == MOVE_DOUBLE_PUSH)
-            pos.ep_sq = (us == WHITE) ? (from + 8) : (from - 8);
+            pos.ep_sq = us == WHITE ? from + 8 : from - 8;
     }
 
     pos.side_to_move = them;
 }
 
-void do_move_copy(Position& pos, Move m, const Tables& tables) noexcept {
-    // Kept for copy-make call sites that still require keyed updates.
-    StateInfo st{};
-    make_move(pos, m, tables, st);
+void do_move_copy(
+    Position& pos,
+    Move move,
+    const Tables& tables
+) noexcept {
+    StateInfo state{};
+    make_move(pos, move, tables, state);
+}
+
+namespace {
+
+constexpr int kValidationMaterialNibbleBits = 4;
+constexpr int kValidationMaterialPiecesPerColor = 5;
+constexpr u8 kValidationNonKingMaterialWeight[PIECE_NB] = {
+    1, 3, 3, 5, 9, 0
+};
+constexpr u8 kValidationMnuePhaseWeight[PIECE_NB] = {
+    0, 1, 1, 2, 4, 0
+};
+
+[[nodiscard]] constexpr bool validation_tracks_material(PieceType piece_type) noexcept {
+    return piece_type >= PAWN && piece_type <= QUEEN;
+}
+
+[[nodiscard]] constexpr int validation_material_shift(
+    Color color,
+    PieceType piece_type
+) noexcept {
+    return static_cast<int>(color) *
+               (kValidationMaterialPiecesPerColor * kValidationMaterialNibbleBits)
+        + static_cast<int>(piece_type) * kValidationMaterialNibbleBits;
+}
+
+} // namespace
+
+bool position_has_valid_kings(const Position& pos) noexcept {
+    const Bitboard white_kings =
+        pos.color_bb[WHITE] & pos.piece_bb[KING];
+    const Bitboard black_kings =
+        pos.color_bb[BLACK] & pos.piece_bb[KING];
+
+    return std::popcount(white_kings) == 1 &&
+           std::popcount(black_kings) == 1;
+}
+
+bool position_board_matches_bitboards(const Position& pos) noexcept {
+    Bitboard color_occ[COLOR_NB]{};
+    Bitboard piece_occ[PIECE_NB]{};
+    std::array<std::array<u8, PIECE_NB>, COLOR_NB> piece_counts{};
+
+    for (int sq = 0; sq < SQ_NB; ++sq) {
+        const Piece piece = static_cast<Piece>(pos.board[sq]);
+        if (piece == PIECE_NONE)
+            continue;
+
+        const Color color = color_of(piece);
+        const PieceType piece_type = type_of(piece);
+
+        color_occ[color] |= bb_of(sq);
+        piece_occ[piece_type] |= bb_of(sq);
+        ++piece_counts[color][piece_type];
+    }
+
+    int expected_non_king_material = 0;
+    int expected_mnue_phase_units = 0;
+    Key expected_material_signature = 0ULL;
+
+    for (int color = WHITE; color <= BLACK; ++color) {
+        const Color piece_color = static_cast<Color>(color);
+
+        for (int piece_type = PAWN; piece_type <= KING; ++piece_type) {
+            const PieceType pt = static_cast<PieceType>(piece_type);
+            const u8 count = piece_counts[piece_color][pt];
+
+            if (count != pos.piece_counts[piece_color][pt])
+                return false;
+
+            if (!validation_tracks_material(pt))
+                continue;
+
+            expected_non_king_material +=
+                static_cast<int>(count) *
+                static_cast<int>(kValidationNonKingMaterialWeight[pt]);
+            expected_mnue_phase_units +=
+                static_cast<int>(count) *
+                static_cast<int>(kValidationMnuePhaseWeight[pt]);
+            expected_material_signature |=
+                static_cast<Key>(count) << validation_material_shift(piece_color, pt);
+        }
+    }
+
+    return color_occ[WHITE] == pos.color_bb[WHITE] &&
+           color_occ[BLACK] == pos.color_bb[BLACK] &&
+           piece_occ[PAWN] == pos.piece_bb[PAWN] &&
+           piece_occ[KNIGHT] == pos.piece_bb[KNIGHT] &&
+           piece_occ[BISHOP] == pos.piece_bb[BISHOP] &&
+           piece_occ[ROOK] == pos.piece_bb[ROOK] &&
+           piece_occ[QUEEN] == pos.piece_bb[QUEEN] &&
+           piece_occ[KING] == pos.piece_bb[KING] &&
+           (pos.color_bb[WHITE] | pos.color_bb[BLACK]) == pos.occupied &&
+           expected_non_king_material == non_king_material(pos) &&
+           expected_mnue_phase_units == mnue_phase_units(pos) &&
+           expected_material_signature == packed_material_signature(pos);
 }
 
 } // namespace magnus

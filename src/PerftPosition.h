@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-#include "Position.h"
+#include "board/Position.h"
 
 namespace magnus::perft_detail {
 

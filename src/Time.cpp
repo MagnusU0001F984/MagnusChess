@@ -23,6 +23,7 @@ SOFTWARE.
 */
 
 #include "Time.h"
+#include "board/Position.h"
 
 #include <algorithm>
 #include <cmath>

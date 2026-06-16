@@ -25,8 +25,11 @@ SOFTWARE.
 #pragma once
 
 #include "Memory.h"
-#include "MoveGen.h"
-#include "Position.h"
+#include "board/MoveGen.h"
+
+namespace magnus {
+struct Position;
+}
 
 /*
  * SEE (靜態交換評估) — Static Exchange Evaluation

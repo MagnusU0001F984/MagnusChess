@@ -20,9 +20,8 @@ Thumbs.db
 *.log
 *.swp
 
-# Binaries and local settings
-src/bin/MagnusChess
-src/bin/.claude/
+# Local settings
+src/build/.claude/
 .deepseek/
 
 *.MNUE

@@ -22,15 +22,15 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include "Attack.h"
+#include "board/Attack.h"
 #include "Bench.h"
 #include "Common.h"
 #include "Memory.h"
-#include "MoveGen.h"
-#include "Mnue.h"
+#include "board/MoveGen.h"
+#include "mnue/Mnue.h"
 #include "Nnue.h"
 #include "Perft.h"
-#include "Position.h"
+#include "board/Position.h"
 #include "Search.h"
 
 #include <array>
@@ -101,9 +101,9 @@ struct SearchBenchResult {
 
 [[nodiscard]] std::string default_mnue_p2_file() {
     constexpr const char* candidates[] = {
-        "6df83890b.MNUE",
-        "bin/6df83890b.MNUE",
-        "src/bin/6df83890b.MNUE"
+        "b7a644d5d.MNUE",
+        "build/b7a644d5d.MNUE",
+        "src/build/b7a644d5d.MNUE"
     };
 
     std::error_code ec;
@@ -112,7 +112,7 @@ struct SearchBenchResult {
             return std::string(candidate);
     }
 
-    return std::string("6df83890b.MNUE");
+    return std::string("b7a644d5d.MNUE");
 }
 
 [[nodiscard]] bool ensure_mnue_p2_loaded(
@@ -756,6 +756,9 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         cfg.divide = true;
         argi = 2;
     }
+    else if (argc > 1 && std::string_view(argv[1]) == "perft") {
+        argi = 2;
+    }
     else if (argc > 1 && std::string_view(argv[1]) == "search") {
         cfg.search = true;
         argi = 2;
@@ -804,8 +807,28 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         cfg.perft_depth = std::max(0, parse_arg_int(argi, cfg.perft_depth));
         cfg.hash_mb = parse_arg_u64(argi + 1, cfg.hash_mb);
         cfg.threads = parse_arg_u64(argi + 2, cfg.threads);
-        if (argc > argi + 3 && std::string_view(argv[argi + 3]) == "live")
-            cfg.live_divide = true;
+
+        bool backend_seen = false;
+        bool live_seen = false;
+        for (int i = argi + 3; i < argc; ++i) {
+            const std::string_view value(argv[i]);
+            const bool is_backend =
+                value == "auto"
+                || value == "pext"
+                || value == "magic"
+                || value == "table"
+                || value == "classical";
+
+            if (value == "live" && !live_seen) {
+                cfg.live_divide = true;
+                live_seen = true;
+            } else if (is_backend && !backend_seen) {
+                cfg.attack_backend = value;
+                backend_seen = true;
+            } else {
+                cfg.valid = false;
+            }
+        }
     }
     if (cfg.hash_mb == 0) cfg.hash_mb = 1;
     if (cfg.threads == 0) cfg.threads = 1;
@@ -817,9 +840,25 @@ int run_bench(int argc, char** argv) {
     const BenchConfig cfg = parse_config(argc, argv);
     bool use_nnue = false;
 
+    if (!cfg.valid) {
+        std::cerr
+            << "usage: MagnusChess [perft] <depth> <hash_mb> <threads> "
+               "[auto|pext|magic|table|classical]\n"
+            << "       MagnusChess divide <depth> <hash_mb> <threads> "
+               "[live] [auto|pext|magic|table|classical]\n";
+        return 1;
+    }
+
     memory::Memory mem{};
     memory_init(mem, cfg.hash_mb, 8, 2);
     attack_init_backend(mem);
+
+    if (!cfg.search && !cfg.evalbench &&
+        !attack_select_backend(cfg.attack_backend)) {
+        std::cerr << "invalid attack backend: " << cfg.attack_backend << '\n';
+        memory_free(mem);
+        return 1;
+    }
 
     Position pos{};
     set_start_position(pos);

@@ -23,7 +23,8 @@ SOFTWARE.
 */
 
 #include "Mnue.h"
-#include "MoveGen.h"
+#include "board/Position.h"
+#include "board/MoveGen.h"
 
 #include <algorithm>
 #include <array>
@@ -56,6 +57,13 @@ constexpr int kScale = 400;
 constexpr int kClip = 255;
 constexpr int kMnueMaterialMax = 78;
 constexpr int kMnueCpMaxRaw = 32768;
+// Keep opening scores conservative: typical start-position search values of
+// 35-45 MNUE raw units should display near 20-30 cp.
+constexpr double kMnueCpBase = 144.0;
+constexpr double kMnueCpMaterial = 16.0;
+constexpr double kMnueCpEndgameDiscount = 8.0;
+constexpr double kMnueCpMinDenominator = 128.0;
+constexpr double kMnueCpMaxDenominator = 168.0;
 
 template<class Layout>
 struct Network {
@@ -344,10 +352,14 @@ template<class Layout>
 
 [[nodiscard]] inline double mnue_cp_denominator(const Position& pos) noexcept {
     const double material = mnue_material_ratio(pos);
-    double denom = 320.0 + 70.0 * material;
+    double denom = kMnueCpBase + kMnueCpMaterial * material;
     if (phase_bucket2(pos) != 0)
-        denom -= 10.0;
-    return std::clamp(denom, 280.0, 410.0);
+        denom -= kMnueCpEndgameDiscount;
+    return std::clamp(
+        denom,
+        kMnueCpMinDenominator,
+        kMnueCpMaxDenominator
+    );
 }
 
 [[nodiscard]] inline int mnue_to_cp(int raw, const Position& pos) noexcept {
@@ -596,31 +608,48 @@ void apply_p2_diff(
         : nullptr;
 
 #if defined(__AVX2__)
-    for (int i = 0; i < P2Layout::HiddenSize; i += 16) {
-        __m256i value = _mm256_loadu_si256(
-            reinterpret_cast<const __m256i*>(src.data() + i)
-        );
-        if (add0 != nullptr)
-            value = _mm256_add_epi16(
-                value,
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add0 + i))
+    // P2 stack states explicitly align both perspective accumulators to a
+    // cache line, so the source/destination traffic can use aligned moves.
+    const auto apply = [&]<int AddCount, int SubCount>() noexcept {
+        for (int i = 0; i < P2Layout::HiddenSize; i += 16) {
+            __m256i value = _mm256_load_si256(
+                reinterpret_cast<const __m256i*>(src.data() + i)
             );
-        if (add1 != nullptr)
-            value = _mm256_add_epi16(
-                value,
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add1 + i))
-            );
-        if (sub0 != nullptr)
-            value = _mm256_sub_epi16(
-                value,
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub0 + i))
-            );
-        if (sub1 != nullptr)
-            value = _mm256_sub_epi16(
-                value,
-                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub1 + i))
-            );
-        _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst.data() + i), value);
+            if constexpr (AddCount >= 1)
+                value = _mm256_add_epi16(
+                    value,
+                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add0 + i))
+                );
+            if constexpr (AddCount >= 2)
+                value = _mm256_add_epi16(
+                    value,
+                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(add1 + i))
+                );
+            if constexpr (SubCount >= 1)
+                value = _mm256_sub_epi16(
+                    value,
+                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub0 + i))
+                );
+            if constexpr (SubCount >= 2)
+                value = _mm256_sub_epi16(
+                    value,
+                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(sub1 + i))
+                );
+            _mm256_store_si256(reinterpret_cast<__m256i*>(dst.data() + i), value);
+        }
+    };
+
+    switch ((static_cast<unsigned>(added_count) << 2) | removed_count) {
+        case 0x0: apply.template operator()<0, 0>(); break;
+        case 0x1: apply.template operator()<0, 1>(); break;
+        case 0x2: apply.template operator()<0, 2>(); break;
+        case 0x4: apply.template operator()<1, 0>(); break;
+        case 0x5: apply.template operator()<1, 1>(); break;
+        case 0x6: apply.template operator()<1, 2>(); break;
+        case 0x8: apply.template operator()<2, 0>(); break;
+        case 0x9: apply.template operator()<2, 1>(); break;
+        case 0xA: apply.template operator()<2, 2>(); break;
+        default:  assert(false); break;
     }
 #else
     for (int i = 0; i < P2Layout::HiddenSize; ++i) {
@@ -638,7 +667,7 @@ using P2MoveDiff = std::array<P2PerspectiveDiff, COLOR_NB>;
 
 void append_p2_feature(
     P2MoveDiff& move_diff,
-    const Position& pos,
+    const std::array<int, COLOR_NB>& buckets,
     Piece pc,
     Square sq,
     bool added
@@ -652,8 +681,8 @@ void append_p2_feature(
             continue;
 
         const int idx = feature_index<P2Layout>(
-            pos,
             static_cast<Color>(persp),
+            buckets[static_cast<std::size_t>(persp)],
             pc,
             sq
         );
@@ -675,6 +704,10 @@ void append_p2_feature(
     Move move
 ) noexcept {
     P2MoveDiff move_diff{};
+    const std::array<int, COLOR_NB> buckets{{
+        input_bucket<P2Layout>(pos, WHITE),
+        input_bucket<P2Layout>(pos, BLACK)
+    }};
     const Square from = from_sq(move);
     const Square to = to_sq(move);
     const Piece moving = piece_on(pos, from);
@@ -697,24 +730,24 @@ void append_p2_feature(
             : to;
         append_p2_feature(
             move_diff,
-            pos,
+            buckets,
             piece_on(pos, captured_sq),
             captured_sq,
             false
         );
     }
 
-    append_p2_feature(move_diff, pos, moving, from, false);
+    append_p2_feature(move_diff, buckets, moving, from, false);
     if (move_is_promotion(move)) {
         append_p2_feature(
             move_diff,
-            pos,
+            buckets,
             make_piece(moving_color, promo_piece(move)),
             to,
             true
         );
     } else {
-        append_p2_feature(move_diff, pos, moving, to, true);
+        append_p2_feature(move_diff, buckets, moving, to, true);
     }
 
     if (move_is_castle(move)) {
@@ -726,8 +759,8 @@ void append_p2_feature(
             ? static_cast<Square>(king_side ? 5 : 3)
             : static_cast<Square>(king_side ? 61 : 59);
         const Piece rook = make_piece(moving_color, ROOK);
-        append_p2_feature(move_diff, pos, rook, rook_from, false);
-        append_p2_feature(move_diff, pos, rook, rook_to, true);
+        append_p2_feature(move_diff, buckets, rook, rook_from, false);
+        append_p2_feature(move_diff, buckets, rook, rook_to, true);
     }
 
     return move_diff;
@@ -766,7 +799,228 @@ void rebuild_accumulator(
 }
 
 
-#if defined(__AVX2__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+[[nodiscard]] inline i64 horizontal_sum_epi64_avx512(__m512i v) noexcept {
+    return static_cast<i64>(_mm512_reduce_add_epi64(v));
+}
+
+[[nodiscard]] inline i64 horizontal_sum_epi32_to_i64_avx512(__m512i v) noexcept {
+    const __m256i lo = _mm512_castsi512_si256(v);
+    const __m256i hi = _mm512_extracti64x4_epi64(v, 1);
+    return horizontal_sum_epi64_avx512(
+        _mm512_add_epi64(
+            _mm512_cvtepi32_epi64(lo),
+            _mm512_cvtepi32_epi64(hi)
+        )
+    );
+}
+
+inline __m512i add_i32x16_to_i64_avx512(__m512i sum, __m512i v) noexcept {
+    const __m256i lo = _mm512_castsi512_si256(v);
+    const __m256i hi = _mm512_extracti64x4_epi64(v, 1);
+    sum = _mm512_add_epi64(sum, _mm512_cvtepi32_epi64(lo));
+    return _mm512_add_epi64(sum, _mm512_cvtepi32_epi64(hi));
+}
+
+[[nodiscard]] i64 dot_pair_screlu_i16_madd_avx512(
+    const i16* acc0,
+    const i16* weights0,
+    const i16* acc1,
+    const i16* weights1,
+    int count
+) noexcept {
+    const __m512i zero16 = _mm512_setzero_si512();
+    const __m512i clip16 = _mm512_set1_epi16(static_cast<i16>(kClip));
+    __m512i sum0_32 = _mm512_setzero_si512();
+    __m512i sum1_32 = _mm512_setzero_si512();
+
+    int i = 0;
+    for (; i + 31 < count; i += 32) {
+        const __m512i acc0_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(acc0 + i)
+        );
+        const __m512i w0_16 = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(weights0 + i)
+        );
+        const __m512i acc1_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(acc1 + i)
+        );
+        const __m512i w1_16 = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(weights1 + i)
+        );
+
+        const __m512i clipped0_16 = _mm512_min_epi16(
+            _mm512_max_epi16(acc0_16_raw, zero16),
+            clip16
+        );
+        const __m512i clipped1_16 = _mm512_min_epi16(
+            _mm512_max_epi16(acc1_16_raw, zero16),
+            clip16
+        );
+
+        const __m512i aw0_16 = _mm512_mullo_epi16(clipped0_16, w0_16);
+        const __m512i aw1_16 = _mm512_mullo_epi16(clipped1_16, w1_16);
+        sum0_32 = _mm512_add_epi32(
+            sum0_32,
+            _mm512_madd_epi16(clipped0_16, aw0_16)
+        );
+        sum1_32 = _mm512_add_epi32(
+            sum1_32,
+            _mm512_madd_epi16(clipped1_16, aw1_16)
+        );
+    }
+
+    i64 total = horizontal_sum_epi32_to_i64_avx512(sum0_32)
+        + horizontal_sum_epi32_to_i64_avx512(sum1_32);
+    for (; i < count; ++i) {
+        total += static_cast<i64>(screlu(acc0[i])) * static_cast<i64>(weights0[i]);
+        total += static_cast<i64>(screlu(acc1[i])) * static_cast<i64>(weights1[i]);
+    }
+
+    return total;
+}
+
+[[nodiscard]] i64 dot_pair_screlu_i16_i32_avx512(
+    const i16* acc0,
+    const i16* weights0,
+    const i16* acc1,
+    const i16* weights1,
+    int count
+) noexcept {
+    const __m512i zero16 = _mm512_setzero_si512();
+    const __m512i clip16 = _mm512_set1_epi16(static_cast<i16>(kClip));
+    __m512i sum0_32 = _mm512_setzero_si512();
+    __m512i sum1_32 = _mm512_setzero_si512();
+
+    int i = 0;
+    for (; i + 31 < count; i += 32) {
+        const __m512i acc0_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(acc0 + i)
+        );
+        const __m512i w0_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(weights0 + i)
+        );
+        const __m512i acc1_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(acc1 + i)
+        );
+        const __m512i w1_16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(weights1 + i)
+        );
+
+        const __m512i clipped0_16 = _mm512_min_epi16(
+            _mm512_max_epi16(acc0_16_raw, zero16),
+            clip16
+        );
+        const __m512i clipped1_16 = _mm512_min_epi16(
+            _mm512_max_epi16(acc1_16_raw, zero16),
+            clip16
+        );
+
+        const __m256i acc0_lo16 = _mm512_castsi512_si256(clipped0_16);
+        const __m256i acc0_hi16 = _mm512_extracti64x4_epi64(clipped0_16, 1);
+        const __m256i w0_lo16 = _mm512_castsi512_si256(w0_16_raw);
+        const __m256i w0_hi16 = _mm512_extracti64x4_epi64(w0_16_raw, 1);
+        const __m256i acc1_lo16 = _mm512_castsi512_si256(clipped1_16);
+        const __m256i acc1_hi16 = _mm512_extracti64x4_epi64(clipped1_16, 1);
+        const __m256i w1_lo16 = _mm512_castsi512_si256(w1_16_raw);
+        const __m256i w1_hi16 = _mm512_extracti64x4_epi64(w1_16_raw, 1);
+
+        const __m512i acc0_lo32 = _mm512_cvtepi16_epi32(acc0_lo16);
+        const __m512i acc0_hi32 = _mm512_cvtepi16_epi32(acc0_hi16);
+        const __m512i w0_lo32 = _mm512_cvtepi16_epi32(w0_lo16);
+        const __m512i w0_hi32 = _mm512_cvtepi16_epi32(w0_hi16);
+        const __m512i acc1_lo32 = _mm512_cvtepi16_epi32(acc1_lo16);
+        const __m512i acc1_hi32 = _mm512_cvtepi16_epi32(acc1_hi16);
+        const __m512i w1_lo32 = _mm512_cvtepi16_epi32(w1_lo16);
+        const __m512i w1_hi32 = _mm512_cvtepi16_epi32(w1_hi16);
+
+        const __m512i sq0_lo32 = _mm512_mullo_epi32(acc0_lo32, acc0_lo32);
+        const __m512i sq0_hi32 = _mm512_mullo_epi32(acc0_hi32, acc0_hi32);
+        const __m512i sq1_lo32 = _mm512_mullo_epi32(acc1_lo32, acc1_lo32);
+        const __m512i sq1_hi32 = _mm512_mullo_epi32(acc1_hi32, acc1_hi32);
+
+        sum0_32 = _mm512_add_epi32(
+            sum0_32,
+            _mm512_mullo_epi32(sq0_lo32, w0_lo32)
+        );
+        sum0_32 = _mm512_add_epi32(
+            sum0_32,
+            _mm512_mullo_epi32(sq0_hi32, w0_hi32)
+        );
+        sum1_32 = _mm512_add_epi32(
+            sum1_32,
+            _mm512_mullo_epi32(sq1_lo32, w1_lo32)
+        );
+        sum1_32 = _mm512_add_epi32(
+            sum1_32,
+            _mm512_mullo_epi32(sq1_hi32, w1_hi32)
+        );
+    }
+
+    i64 total = horizontal_sum_epi32_to_i64_avx512(sum0_32)
+        + horizontal_sum_epi32_to_i64_avx512(sum1_32);
+    for (; i < count; ++i) {
+        total += static_cast<i64>(screlu(acc0[i])) * static_cast<i64>(weights0[i]);
+        total += static_cast<i64>(screlu(acc1[i])) * static_cast<i64>(weights1[i]);
+    }
+
+    return total;
+}
+
+[[nodiscard]] i64 dot_screlu_i16_avx512(
+    const i16* acc,
+    const i16* weights,
+    int count
+) noexcept {
+    const __m512i zero16 = _mm512_setzero_si512();
+    const __m512i clip16 = _mm512_set1_epi16(static_cast<i16>(kClip));
+    __m512i sum64 = _mm512_setzero_si512();
+
+    int i = 0;
+    for (; i + 31 < count; i += 32) {
+        const __m512i acc16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(acc + i)
+        );
+        const __m512i w16_raw = _mm512_loadu_si512(
+            reinterpret_cast<const void*>(weights + i)
+        );
+        const __m512i clipped16 = _mm512_min_epi16(
+            _mm512_max_epi16(acc16_raw, zero16),
+            clip16
+        );
+
+        const __m256i acc_lo16 = _mm512_castsi512_si256(clipped16);
+        const __m256i acc_hi16 = _mm512_extracti64x4_epi64(clipped16, 1);
+        const __m256i w_lo16 = _mm512_castsi512_si256(w16_raw);
+        const __m256i w_hi16 = _mm512_extracti64x4_epi64(w16_raw, 1);
+
+        const __m512i acc_lo32 = _mm512_cvtepi16_epi32(acc_lo16);
+        const __m512i acc_hi32 = _mm512_cvtepi16_epi32(acc_hi16);
+        const __m512i w_lo32 = _mm512_cvtepi16_epi32(w_lo16);
+        const __m512i w_hi32 = _mm512_cvtepi16_epi32(w_hi16);
+        const __m512i prod_lo32 = _mm512_mullo_epi32(
+            _mm512_mullo_epi32(acc_lo32, acc_lo32),
+            w_lo32
+        );
+        const __m512i prod_hi32 = _mm512_mullo_epi32(
+            _mm512_mullo_epi32(acc_hi32, acc_hi32),
+            w_hi32
+        );
+
+        sum64 = add_i32x16_to_i64_avx512(sum64, prod_lo32);
+        sum64 = add_i32x16_to_i64_avx512(sum64, prod_hi32);
+    }
+
+    i64 total = horizontal_sum_epi64_avx512(sum64);
+    for (; i < count; ++i)
+        total += static_cast<i64>(screlu(acc[i])) * static_cast<i64>(weights[i]);
+
+    return total;
+}
+#endif
+
+#if defined(__AVX2__) \
+    && !(defined(__AVX512F__) && defined(__AVX512BW__))
 [[nodiscard]] inline i64 horizontal_sum_epi64_avx2(__m256i v) noexcept {
     const __m128i lo = _mm256_castsi256_si128(v);
     const __m128i hi = _mm256_extracti128_si256(v, 1);
@@ -1011,7 +1265,28 @@ template<class Layout>
     const i16* w_nstm = w_stm + Layout::HiddenSize;
 
     i64 output = 0;
-#if defined(__AVX2__)
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    if (net.forward_madd_safe) {
+        output += dot_pair_screlu_i16_madd_avx512(
+            stm_acc.data(),
+            w_stm,
+            nstm_acc.data(),
+            w_nstm,
+            Layout::HiddenSize
+        );
+    } else if (net.forward_i32_safe) {
+        output += dot_pair_screlu_i16_i32_avx512(
+            stm_acc.data(),
+            w_stm,
+            nstm_acc.data(),
+            w_nstm,
+            Layout::HiddenSize
+        );
+    } else {
+        output += dot_screlu_i16_avx512(stm_acc.data(), w_stm, Layout::HiddenSize);
+        output += dot_screlu_i16_avx512(nstm_acc.data(), w_nstm, Layout::HiddenSize);
+    }
+#elif defined(__AVX2__)
     if (net.forward_madd_safe) {
         output += dot_pair_screlu_i16_madd_avx2(
             stm_acc.data(),
@@ -1155,7 +1430,7 @@ struct P2AccumulatorStack::Impl {
     static constexpr std::size_t Capacity = 132;
 
     struct alignas(64) State {
-        std::array<Accumulator<P2Layout>, COLOR_NB> accumulation{};
+        alignas(64) std::array<Accumulator<P2Layout>, COLOR_NB> accumulation{};
         P2MoveDiff diff{};
         std::uint8_t computed_mask = 0;
     };
@@ -1341,6 +1616,16 @@ const std::string& last_error() noexcept {
     return g_error;
 }
 
+const char* eval_simd_name() noexcept {
+#if defined(__AVX512F__) && defined(__AVX512BW__)
+    return "AVX-512BW";
+#elif defined(__AVX2__)
+    return "AVX2";
+#else
+    return "scalar";
+#endif
+}
+
 int eval_p2(const Position& pos) noexcept {
     struct StandaloneContext {
         P2AccumulatorStack stack{};
@@ -1386,7 +1671,7 @@ int debug_eval_p2_reference(const Position& pos) noexcept {
 }
 
 bool p2_i32_forward_enabled() noexcept {
-#if defined(__AVX2__)
+#if (defined(__AVX512F__) && defined(__AVX512BW__)) || defined(__AVX2__)
     return g_p2.loaded && g_p2.valid() && g_p2.forward_i32_safe;
 #else
     return false;

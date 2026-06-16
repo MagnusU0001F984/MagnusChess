@@ -23,6 +23,8 @@ SOFTWARE.
 */
 
 #include "MovePicker.h"
+#include "board/MoveGen.h"
+
 
 #include <algorithm>
 #include <limits>

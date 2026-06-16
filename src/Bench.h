@@ -33,10 +33,14 @@ SOFTWARE.
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <string_view>
 
 #include "Memory.h"
 #include "Perft.h"
-#include "Position.h"
+
+namespace magnus {
+struct Position;
+}
 
 namespace magnus {
 
@@ -65,6 +69,8 @@ struct BenchConfig {
     bool search = false;
     bool timed_search = false;
     bool live_divide = false;
+    std::string_view attack_backend = "auto";
+    bool valid = true;
 };
 
 struct PerftBenchResult {

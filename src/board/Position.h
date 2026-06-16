@@ -22,12 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-/* ===== ANNOTATED: 繁體中文註釋已添加 =====
- * 本檔案是 MagnusChess 西洋棋引擎的一部分。
- * 詳細說明請參閱對應的 .cpp 實作檔案。
- */
-
-
 #pragma once
 
 #include <array>
@@ -37,20 +31,8 @@ SOFTWARE.
 
 namespace magnus {
 
-struct Tables;
-
-/*
-Position is the engine's canonical board state. It keeps mailbox access for
-simple piece lookup, bitboards for fast move generation, incremental eval
-totals, and an incremental Zobrist key for search and TT use.
-*/
-/*
- * Position — 引擎的標準棋盤狀態
- * 維護信箱 (mailbox) 用於簡單棋子查詢、位元棋盤用於快速著法生成、
- * 增量評估快取、增量 Zobrist 鍵值供搜尋和 TT 使用。
- * NNUE 累加器儲存在 Position 中（每個視角一個），支援增量更新。
- * StateInfo 記錄一步棋的狀態變化，供 unmake_move 恢復。
- */
+// Canonical board state. Field order is intentionally stable because Position
+// is copied frequently and owns aligned NNUE accumulator storage.
 struct Position {
     int side_to_move = WHITE;
     Square ep_sq = NO_SQ;
@@ -75,14 +57,15 @@ struct Position {
 
     int board[SQ_NB];
 
-    // NNUE keeps dual-perspective hidden-layer accumulators inside Position so
-    // make/unmake and copy-make paths can share the same incremental state.
     mutable u32 nnue_generation = 0;
     mutable bool nnue_acc_valid = false;
-    alignas(64) mutable std::array<std::array<i16, nnue::kHiddenSize>, COLOR_NB> nnue_acc{};
-
+    alignas(64) mutable std::array<
+        std::array<i16, nnue::kHiddenSize>,
+        COLOR_NB
+    > nnue_acc{};
 };
 
+// Reversible metadata captured before make_move().
 struct StateInfo {
     int castling_rights = 0;
     Square ep_sq = NO_SQ;
@@ -93,7 +76,6 @@ struct StateInfo {
     Square captured_sq = NO_SQ;
 };
 
-// Convenience accessors used throughout the engine.
 inline int us(const Position& pos) noexcept {
     return pos.side_to_move;
 }
@@ -110,16 +92,27 @@ inline Bitboard pieces(const Position& pos, Color color) noexcept {
     return pos.color_bb[color];
 }
 
-inline Bitboard pieces_of_type(const Position& pos, PieceType pt) noexcept {
-    return pos.piece_bb[pt];
+inline Bitboard pieces_of_type(
+    const Position& pos,
+    PieceType piece_type
+) noexcept {
+    return pos.piece_bb[piece_type];
 }
 
-inline Bitboard pieces(const Position& pos, Color color, PieceType pt) noexcept {
-    return pos.color_bb[color] & pos.piece_bb[pt];
+inline Bitboard pieces(
+    const Position& pos,
+    Color color,
+    PieceType piece_type
+) noexcept {
+    return pos.color_bb[color] & pos.piece_bb[piece_type];
 }
 
-inline int piece_count(const Position& pos, Color color, PieceType pt) noexcept {
-    return static_cast<int>(pos.piece_counts[color][pt]);
+inline int piece_count(
+    const Position& pos,
+    Color color,
+    PieceType piece_type
+) noexcept {
+    return static_cast<int>(pos.piece_counts[color][piece_type]);
 }
 
 inline int non_king_material(const Position& pos) noexcept {
@@ -147,13 +140,13 @@ inline Piece piece_on(const Position& pos, Square sq) noexcept {
 }
 
 inline Color color_on(const Position& pos, Square sq) noexcept {
-    const Piece pc = static_cast<Piece>(pos.board[sq]);
-    return pc == PIECE_NONE ? COLOR_NONE : color_of(pc);
+    const Piece piece = static_cast<Piece>(pos.board[sq]);
+    return piece == PIECE_NONE ? COLOR_NONE : color_of(piece);
 }
 
 inline PieceType piece_type_on(const Position& pos, Square sq) noexcept {
-    const Piece pc = static_cast<Piece>(pos.board[sq]);
-    return pc == PIECE_NONE ? PIECE_TYPE_NONE : type_of(pc);
+    const Piece piece = static_cast<Piece>(pos.board[sq]);
+    return piece == PIECE_NONE ? PIECE_TYPE_NONE : type_of(piece);
 }
 
 inline bool empty_on(const Position& pos, Square sq) noexcept {
@@ -163,6 +156,8 @@ inline bool empty_on(const Position& pos, Square sq) noexcept {
 inline bool occupied_on(const Position& pos, Square sq) noexcept {
     return pos.board[sq] != PIECE_NONE;
 }
+
+struct Tables;
 
 void position_clear(Position& pos) noexcept;
 void position_copy_without_accumulators(Position& dst, const Position& src) noexcept;
