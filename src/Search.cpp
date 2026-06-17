@@ -312,21 +312,46 @@ enum class ScoreModel {
     return victim_value * 32 - attacker_value;
 }
 
+[[nodiscard]] inline memory::Bound score_bound_from_window(
+    int score,
+    int alpha,
+    int beta
+) noexcept {
+    if (score <= alpha)
+        return memory::BOUND_UPPER;
+    if (score >= beta)
+        return memory::BOUND_LOWER;
+    return memory::BOUND_EXACT;
+}
+
+inline void append_uci_score_bound(
+    std::ostream& out,
+    memory::Bound bound
+) {
+    if (bound == memory::BOUND_UPPER)
+        out << " upperbound";
+    else if (bound == memory::BOUND_LOWER)
+        out << " lowerbound";
+}
+
 inline void append_uci_score(
     std::ostream& out,
     int score,
     const Position& root,
-    ScoreModel score_model
+    ScoreModel score_model,
+    memory::Bound bound
 ) {
     if (score >= VALUE_MATE - MAX_PLY) {
         const int plies_to_mate = VALUE_MATE - score;
         out << "score mate " << ((plies_to_mate + 1) / 2);
+        append_uci_score_bound(out, bound);
         return;
     }
 
     if (score <= -VALUE_MATE + MAX_PLY) {
         const int plies_to_mate = VALUE_MATE + score;
         out << "score mate -" << ((plies_to_mate + 1) / 2);
+        append_uci_score_bound(out, bound);
         return;
     }
 
@@ -336,8 +361,9 @@ inline void append_uci_score(
         const int distance = VALUE_TB - std::abs(score);
         const int display_score =
             score > 0 ? TB_CP - distance : -TB_CP + distance;
-        out << "score cp " << display_score
-            << " wdl "
+        out << "score cp " << display_score;
+        append_uci_score_bound(out, bound);
+        out << " wdl "
             << (score > 0 ? "1000 0 0" : "0 0 1000");
         return;
     }
@@ -348,6 +374,7 @@ inline void append_uci_score(
     else if (score_model == ScoreModel::Nnue)
         display_score = nnue::search_score_to_cp(score, root);
     out << "score cp " << display_score;
+    append_uci_score_bound(out, bound);
 
     if (score_model == ScoreModel::Mnue) {
         const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
@@ -967,11 +994,7 @@ struct Searcher {
         int alpha,
         int beta
     ) noexcept {
-        if (score <= alpha)
-            return memory::BOUND_UPPER;
-        if (score >= beta)
-            return memory::BOUND_LOWER;
-        return memory::BOUND_EXACT;
+        return score_bound_from_window(score, alpha, beta);
     }
 
     [[nodiscard]] static inline bool is_mate_window(int score) noexcept {
@@ -4017,6 +4040,7 @@ struct IterativeWorkerResult {
     SearchResult best{};
     Move pv[MAX_PLY]{};
     int pv_length = 0;
+    memory::Bound score_bound = memory::BOUND_EXACT;
 };
 
 [[nodiscard]] bool pv_contains_key(
@@ -4171,9 +4195,11 @@ void extend_syzygy_pv(
 void capture_completed_result(
     IterativeWorkerResult& result,
     const SearchResult& best,
-    const Searcher& searcher
+    const Searcher& searcher,
+    memory::Bound score_bound
 ) noexcept {
     result.best = best;
+    result.score_bound = score_bound;
     result.pv_length = searcher.pv_length[0];
     result.best.pv_length = result.pv_length;
     for (int i = 0; i < result.pv_length; ++i) {
@@ -4193,7 +4219,8 @@ void emit_iteration_info(
     Searcher::clock::time_point search_start,
     u64 nodes,
     u64 tb_hits,
-    int depth
+    int depth,
+    memory::Bound score_bound
 ) {
     const double seconds =
         std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
@@ -4211,7 +4238,8 @@ void emit_iteration_info(
         local_root,
         searcher.use_mnue()
             ? ScoreModel::Mnue
-            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce)
+            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
+        score_bound
     );
     stream << " nodes " << nodes
            << " nps " << nps
@@ -4220,8 +4248,17 @@ void emit_iteration_info(
            << " time " << time_ms
            << " pv";
 
-    for (int i = 0; i < pv_length; ++i)
-        stream << ' ' << move_to_uci(pv[i]);
+    Move fallback_pv[1]{};
+    const Move* emitted_pv = pv;
+    int emitted_pv_length = pv_length;
+    if (emitted_pv_length <= 0 && !move_is_none(current.best_move)) {
+        fallback_pv[0] = current.best_move;
+        emitted_pv = fallback_pv;
+        emitted_pv_length = 1;
+    }
+
+    for (int i = 0; i < emitted_pv_length; ++i)
+        stream << ' ' << move_to_uci(emitted_pv[i]);
 
     stream << '\n';
 }
@@ -4277,6 +4314,9 @@ void emit_iteration_info(
         int beta = VALUE_INF;
         int delta = ASPIRATION_DELTA;
         int depth_max_seldepth = 0;
+        memory::Bound current_score_bound = memory::BOUND_EXACT;
+        int current_bound_alpha = alpha;
+        int current_bound_beta = beta;
 
         if (use_root_aspiration(searcher.limits, depth)) {
             alpha = std::max(-VALUE_INF, best.score - delta);
@@ -4289,18 +4329,33 @@ void emit_iteration_info(
 
             reset_searcher_iteration(searcher, search_start, total_nodes + depth_nodes);
 
-            current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
+            const int attempt_alpha = alpha;
+            const int attempt_beta = beta;
+            current_bound_alpha = attempt_alpha;
+            current_bound_beta = attempt_beta;
+            current = searcher.search_root(
+                keyed_root,
+                depth,
+                hint_move,
+                attempt_alpha,
+                attempt_beta
+            );
             depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
             current.seldepth = depth_max_seldepth;
             searcher.publish_nodes();
             searcher.publish_tb_hits();
             depth_nodes += current.nodes;
             depth_tb_hits += current.tb_hits;
+            current_score_bound = score_bound_from_window(
+                current.score,
+                attempt_alpha,
+                attempt_beta
+            );
 
             if (searcher.stopped || depth == 1)
                 break;
 
-            if (current.score <= alpha) {
+            if (current.score <= attempt_alpha) {
 #if MAGNUS_SEARCHSTATS_OBS
                 ++aspiration_fail_low;
 #endif
@@ -4310,7 +4365,7 @@ void emit_iteration_info(
                 continue;
             }
 
-            if (current.score >= beta) {
+            if (current.score >= attempt_beta) {
 #if MAGNUS_SEARCHSTATS_OBS
                 ++aspiration_fail_high;
 #endif
@@ -4347,6 +4402,11 @@ void emit_iteration_info(
                 searcher.limits.syzygy_50_move_rule
             );
         }
+        current_score_bound = score_bound_from_window(
+            current.score,
+            current_bound_alpha,
+            current_bound_beta
+        );
 
         total_nodes += depth_nodes;
         total_tb_hits += depth_tb_hits;
@@ -4363,7 +4423,7 @@ void emit_iteration_info(
             best.nodes = total_nodes;
             best.tb_hits = total_tb_hits;
             hint_move = current.best_move;
-            capture_completed_result(result, best, searcher);
+            capture_completed_result(result, best, searcher, current_score_bound);
         }
 
         const bool should_stop_for_time =
@@ -4397,7 +4457,8 @@ void emit_iteration_info(
                 search_start,
                 reported_nodes,
                 reported_tb_hits,
-                depth
+                depth,
+                current_score_bound
             );
 #if MAGNUS_SEARCHSTATS_OBS
             emit_searchstats_line(
@@ -4415,27 +4476,45 @@ void emit_iteration_info(
 
         if (stopped_mid_depth) {
             if (local_out != nullptr &&
-                searcher.limits.report_info &&
-                depth > best.depth + 1) {
+                searcher.limits.report_info) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
                 const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
                     ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
                     : total_tb_hits;
-                emit_iteration_info(
-                    *local_out,
-                    searcher.mem,
-                    keyed_root,
-                    searcher,
-                    best,
-                    result.pv,
-                    result.pv_length,
-                    search_start,
-                    reported_nodes,
-                    reported_tb_hits,
-                    best.depth
-                );
+                if (!move_is_none(current.best_move) && current.nodes > 0) {
+                    emit_iteration_info(
+                        *local_out,
+                        searcher.mem,
+                        keyed_root,
+                        searcher,
+                        current,
+                        searcher.pv_table[0],
+                        searcher.pv_length[0],
+                        search_start,
+                        reported_nodes,
+                        reported_tb_hits,
+                        depth,
+                        // Partial root search is a best-so-far estimate, not exact.
+                        memory::BOUND_LOWER
+                    );
+                } else if (depth > best.depth + 1) {
+                    emit_iteration_info(
+                        *local_out,
+                        searcher.mem,
+                        keyed_root,
+                        searcher,
+                        best,
+                        result.pv,
+                        result.pv_length,
+                        search_start,
+                        reported_nodes,
+                        reported_tb_hits,
+                        best.depth,
+                        result.score_bound
+                    );
+                }
 #if MAGNUS_SEARCHSTATS_OBS
                 const u64 reported_depth_nodes =
                     reported_nodes >= last_reported_nodes
@@ -4562,7 +4641,8 @@ void emit_iteration_info(
             search_start,
             result.best.nodes,
             result.best.tb_hits,
-            result.best.depth
+            result.best.depth,
+            result.score_bound
         );
     }
 
@@ -4682,7 +4762,13 @@ void emit_iteration_info(
 
         stream << "info depth " << result.best.depth
                << " seldepth " << result.best.seldepth << ' ';
-        append_uci_score(stream, result.best.score, local_root, score_model);
+        append_uci_score(
+            stream,
+            result.best.score,
+            local_root,
+            score_model,
+            result.score_bound
+        );
         stream << " nodes " << nodes
                << " nps " << nps
                << " tbhits " << tb_hits
@@ -4820,6 +4906,7 @@ void emit_iteration_info(
                 best.best.pv[i] = best.pv[i];
             }
             best.best.pv_length = best.pv_length;
+            best.score_bound = memory::BOUND_EXACT;
         }
     }
 
