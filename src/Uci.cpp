@@ -601,12 +601,26 @@ enum class DisplayScoreModel {
 }
 
 [[nodiscard]] bool parse_bool(std::string_view sv, bool& value) noexcept {
-    if (sv == "true" || sv == "1") {
+    const auto equals_ci = [sv](std::string_view expected) noexcept {
+        if (sv.size() != expected.size())
+            return false;
+
+        for (std::size_t i = 0; i < sv.size(); ++i) {
+            const char lhs = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(sv[i]))
+            );
+            if (lhs != expected[i])
+                return false;
+        }
+        return true;
+    };
+
+    if (equals_ci("true") || sv == "1") {
         value = true;
         return true;
     }
 
-    if (sv == "false" || sv == "0") {
+    if (equals_ci("false") || sv == "0") {
         value = false;
         return true;
     }
@@ -887,6 +901,8 @@ struct UciSession {
     bool use_nnue = true;
     bool enable_ponder = true;
     bool singular_telemetry = false;
+    bool use_msv_smp = false;
+    bool msv_info = false;
     int threads = DEFAULT_UCI_THREADS;
     int contempt = DEFAULT_UCI_CONTEMPT;
     int syzygy_probe_depth = syzygy::DEFAULT_PROBE_DEPTH;
@@ -1007,6 +1023,8 @@ struct UciSession {
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
         out << "option name Singular Telemetry type check default false\n";
+        out << "option name UseMsvSmp type check default false\n";
+        out << "option name MsvInfo type check default false\n";
         out << "option name SyzygyPath type string default <empty>\n";
         out << "option name SyzygyProbeDepth type spin default "
             << syzygy::DEFAULT_PROBE_DEPTH
@@ -1178,6 +1196,16 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 singular_telemetry = parsed;
+        }
+        else if (name == "UseMsvSmp") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                use_msv_smp = parsed;
+        }
+        else if (name == "MsvInfo") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                msv_info = parsed;
         }
         else if (name == "SyzygyPath") {
             syzygy_path = value == "<empty>" ? std::string{} : value;
@@ -1412,6 +1440,8 @@ struct UciSession {
             limits.use_nnue = use_nnue;
             limits.contempt = contempt;
             limits.singular_telemetry = singular_telemetry;
+            limits.use_msv_smp = use_msv_smp;
+            limits.msv_info = msv_info;
             limits.thread_count = sort_threads;
             limits.thread_id = 0;
             limits.report_info = true;
@@ -1600,6 +1630,8 @@ struct UciSession {
 
         limits.contempt = contempt;
         limits.singular_telemetry = singular_telemetry;
+        limits.use_msv_smp = use_msv_smp;
+        limits.msv_info = msv_info;
         limits.stop = &stop_requested;
         limits.pondering = &pondering;
         limits.ponder_time_offset_ms = &ponder_time_offset_ms;

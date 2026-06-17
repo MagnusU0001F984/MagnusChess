@@ -32,6 +32,7 @@ SOFTWARE.
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -87,6 +88,17 @@ SOFTWARE.
  */
 
 namespace magnus::search {
+
+struct RootMsvShared {
+    struct Record {
+        Move move = 0;
+        RootMsvEntry entry{};
+        int lastPriority = 0;
+    };
+
+    std::mutex mutex;
+    std::vector<Record> records;
+};
 
 namespace {
 
@@ -383,6 +395,277 @@ inline void append_uci_score(
         const nnue::WdlTriplet wdl = nnue::search_score_to_wdl(score, root);
         out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
     }
+}
+
+[[nodiscard]] inline bool root_msv_enabled(
+    const SearchLimits& limits
+) noexcept {
+    return limits.use_msv_smp &&
+           limits.thread_count > 1 &&
+           limits.root_msv != nullptr;
+}
+
+[[nodiscard]] RootMsvShared::Record* root_msv_find_locked(
+    RootMsvShared& shared,
+    Move move
+) noexcept {
+    for (RootMsvShared::Record& record : shared.records)
+        if (record.move == move)
+            return &record;
+    return nullptr;
+}
+
+void root_msv_seed_moves(
+    const Position& root,
+    const memory::Memory& mem,
+    const SearchLimits& limits,
+    RootMsvShared& shared
+) {
+    MoveList list{};
+    generate_legal(root, mem, list);
+
+    if (limits.root_move_count > 0) {
+        MoveList filtered{};
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            bool allowed = false;
+            for (int j = 0; j < limits.root_move_count; ++j) {
+                if (limits.root_moves[j] == move) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (allowed)
+                filtered.moves[filtered.size++] = move;
+        }
+        list = filtered;
+    }
+
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    shared.records.clear();
+    shared.records.reserve(static_cast<std::size_t>(list.size));
+    for (int i = 0; i < list.size; ++i) {
+        const Move move = list.moves[i];
+        const auto duplicate = std::find_if(
+            shared.records.begin(),
+            shared.records.end(),
+            [move](const RootMsvShared::Record& record) noexcept {
+                return record.move == move;
+            }
+        );
+        if (duplicate == shared.records.end())
+            shared.records.push_back({move, RootMsvEntry{}, 0});
+    }
+}
+
+[[nodiscard]] RootMsvEntry root_msv_snapshot(
+    const SearchLimits& limits,
+    Move move
+) {
+    if (!root_msv_enabled(limits))
+        return RootMsvEntry{};
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    const RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    return record != nullptr ? record->entry : RootMsvEntry{};
+}
+
+void root_msv_set_last_priority(
+    const SearchLimits& limits,
+    Move move,
+    int priority
+) {
+    if (!root_msv_enabled(limits))
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record != nullptr)
+        record->lastPriority = priority;
+}
+
+[[nodiscard]] bool root_msv_has_signal(
+    const SearchLimits& limits
+) {
+    if (!root_msv_enabled(limits))
+        return false;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    for (const RootMsvShared::Record& record : shared.records) {
+        const RootMsvEntry& entry = record.entry;
+        if (entry.credit > 0)
+            return true;
+    }
+    return false;
+}
+
+void root_msv_adjust_active(
+    const SearchLimits& limits,
+    Move move,
+    int delta
+) {
+    if (!root_msv_enabled(limits) || move_is_none(move))
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record == nullptr)
+        return;
+
+    RootMsvEntry& entry = record->entry;
+    entry.activeWorkers = std::max(0, entry.activeWorkers + delta);
+}
+
+struct RootMsvActiveGuard {
+    const SearchLimits& limits;
+    Move move = 0;
+    bool active = false;
+
+    RootMsvActiveGuard(const SearchLimits& l, Move m)
+        : limits(l), move(m), active(root_msv_enabled(l) && !move_is_none(m)) {
+        if (active)
+            root_msv_adjust_active(limits, move, 1);
+    }
+
+    ~RootMsvActiveGuard() {
+        if (active)
+            root_msv_adjust_active(limits, move, -1);
+    }
+
+    RootMsvActiveGuard(const RootMsvActiveGuard&) = delete;
+    RootMsvActiveGuard& operator=(const RootMsvActiveGuard&) = delete;
+};
+
+[[nodiscard]] inline int root_msv_bad_bound_penalty(
+    memory::Bound bound
+) noexcept {
+    if (bound == memory::BOUND_UPPER)
+        return 96;
+    if (bound == memory::BOUND_LOWER)
+        return 48;
+    return 0;
+}
+
+[[nodiscard]] inline int root_msv_priority_from_entry(
+    int score_part,
+    int history_prior,
+    int depth,
+    const RootMsvEntry& entry
+) noexcept {
+    const int hit_count = entry.exactHits + entry.boundHits;
+    const int credit_part = entry.credit * 2;
+    const int stable_bonus = std::min(entry.stableCount, 16) * 12;
+    const int uncertainty_bonus = hit_count > 0
+        ? std::clamp(depth - entry.maxDepth, 0, 8) * 6
+        : 0;
+    const int active_worker_penalty = entry.activeWorkers * 96;
+    const int bad_bound_penalty = root_msv_bad_bound_penalty(entry.lastBound);
+
+    return score_part
+         + history_prior
+         + credit_part
+         + stable_bonus
+         + uncertainty_bonus
+         - active_worker_penalty
+         - bad_bound_penalty;
+}
+
+void root_msv_record_completed(
+    const SearchLimits& limits,
+    Move move,
+    int depth,
+    int seldepth,
+    int score,
+    memory::Bound bound,
+    bool stopped,
+    bool pv_valid,
+    int pv_length
+) {
+    if (!root_msv_enabled(limits) || move_is_none(move))
+        return;
+
+    if (stopped || !pv_valid || pv_length <= 2)
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+
+    for (RootMsvShared::Record& record : shared.records)
+        record.entry.credit = (record.entry.credit * 7) / 8;
+
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record == nullptr)
+        return;
+
+    RootMsvEntry& entry = record->entry;
+    const int previous_max_depth = entry.maxDepth;
+    const int previous_score = entry.lastScore;
+    const bool had_valid_pv = entry.pvValid;
+
+    entry.stopped = false;
+    entry.pvValid = pv_valid;
+    entry.pvLength = pv_length;
+    entry.lastScore = score;
+    entry.lastBound = bound;
+    entry.maxDepth = std::max(entry.maxDepth, depth);
+    entry.maxSelDepth = std::max(entry.maxSelDepth, seldepth);
+
+    if (bound == memory::BOUND_EXACT)
+        ++entry.exactHits;
+    else if (bound == memory::BOUND_LOWER || bound == memory::BOUND_UPPER)
+        ++entry.boundHits;
+
+    bool new_worker = false;
+    if (limits.thread_id >= 0 && limits.thread_id < 64) {
+        const std::uint64_t worker_bit = 1ULL << limits.thread_id;
+        new_worker = (entry.workerMask & worker_bit) == 0;
+        entry.workerMask |= worker_bit;
+        if (new_worker)
+            ++entry.workerHits;
+    }
+
+    const bool score_stable =
+        had_valid_pv && std::abs(score - previous_score) <= 32;
+    const bool depth_stable =
+        previous_max_depth > 0 && std::abs(depth - previous_max_depth) <= 2;
+    if (score_stable || depth_stable)
+        entry.stableCount = std::min(entry.stableCount + 1, 64);
+    else
+        entry.stableCount = std::max(1, (entry.stableCount * 3) / 4);
+
+    int bonus = 8; // completed search
+    if (bound == memory::BOUND_EXACT)
+        bonus += 48;
+    else if (bound == memory::BOUND_LOWER || bound == memory::BOUND_UPPER)
+        bonus += 12;
+    else
+        bonus = 0;
+
+    if (pv_length >= 4)
+        bonus += 16;
+
+    if (previous_max_depth > 0) {
+        const int depth_gap = std::abs(depth - previous_max_depth);
+        if (depth_gap <= 4)
+            bonus += 24;
+        else if (depth_gap <= 8)
+            bonus += 12;
+        else if (depth_gap <= 16)
+            bonus += 6;
+    }
+
+    if (new_worker)
+        bonus += 16;
+
+    if (bound != memory::BOUND_EXACT)
+        bonus /= 2;
+
+    if (bonus > 0)
+        entry.credit = std::clamp(entry.credit + bonus, 0, 4096);
 }
 
 /*
@@ -2209,6 +2492,159 @@ struct Searcher {
         }
     }
 
+    [[nodiscard]] inline bool root_msv_worker_ordering() const noexcept {
+        return root_msv_enabled(limits) &&
+               limits.thread_id != 0 &&
+               root_msv_has_signal(limits);
+    }
+
+    [[nodiscard]] inline int root_msv_history_prior(
+        const Position& pos,
+        Move move,
+        int depth,
+        int see_value
+    ) const noexcept {
+        if (move_is_capture(move))
+            return history_tables.capture_ordering_score_fast(
+                pos,
+                move,
+                depth,
+                see_value
+            ) / 8;
+
+        return history_tables.quiet_ordering_score_fast(
+            pos,
+            move,
+            Move(0),
+            ContinuationHistoryContext{},
+            ContinuationHistoryContext{},
+            ContinuationHistoryContext{}
+        ) / 8;
+    }
+
+    [[nodiscard]] inline int root_msv_priority(
+        const Position& pos,
+        const ScoredMove& scored,
+        int depth
+    ) const {
+        const RootMsvEntry entry = root_msv_snapshot(limits, scored.move);
+        const int score_part = scored.score / 1024;
+        const int history_prior = root_msv_history_prior(
+            pos,
+            scored.move,
+            depth,
+            scored.see_value
+        );
+        const int priority = root_msv_priority_from_entry(
+            score_part,
+            history_prior,
+            depth,
+            entry
+        );
+        root_msv_set_last_priority(limits, scored.move, priority);
+        return priority;
+    }
+
+    inline void apply_msv_root_order(
+        const Position& pos,
+        ScoredMoveList& scored,
+        int depth
+    ) const {
+        if (!root_msv_worker_ordering())
+            return;
+
+        for (int i = 0; i < scored.size; ++i)
+            scored.moves[i].score = root_msv_priority(pos, scored.moves[i], depth);
+    }
+
+    void emit_msv_info(
+        std::ostream& out,
+        const Position& root,
+        int depth
+    ) const {
+        if (!root_msv_enabled(limits) ||
+            !limits.msv_info ||
+            limits.thread_id != 0) {
+            return;
+        }
+
+        MoveList list{};
+        generate_legal(root, mem, list);
+
+        if (limits.root_move_count > 0) {
+            MoveList filtered{};
+            for (int i = 0; i < list.size; ++i) {
+                const Move move = list.moves[i];
+                bool allowed = false;
+                for (int j = 0; j < limits.root_move_count; ++j) {
+                    if (limits.root_moves[j] == move) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (allowed)
+                    filtered.moves[filtered.size++] = move;
+            }
+            list = filtered;
+        }
+
+        const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
+        const Move tt_move = tt_move_from_probe(probe);
+        ScoredMoveList scored{};
+        score_moves(root, list, scored, tt_move, 0, depth);
+
+        struct DebugEntry {
+            Move move = 0;
+            RootMsvEntry entry{};
+            int priority = 0;
+        };
+
+        std::vector<DebugEntry> entries;
+        entries.reserve(static_cast<std::size_t>(scored.size));
+        for (int i = 0; i < scored.size; ++i) {
+            const int priority = root_msv_priority(root, scored.moves[i], depth);
+            const RootMsvEntry entry = root_msv_snapshot(limits, scored.moves[i].move);
+            if (entry.credit == 0 &&
+                entry.exactHits == 0 &&
+                entry.boundHits == 0 &&
+                entry.activeWorkers == 0) {
+                continue;
+            }
+
+            entries.push_back({scored.moves[i].move, entry, priority});
+        }
+
+        if (entries.empty())
+            return;
+
+        std::stable_sort(
+            entries.begin(),
+            entries.end(),
+            [](const DebugEntry& lhs, const DebugEntry& rhs) noexcept {
+                if (lhs.priority != rhs.priority)
+                    return lhs.priority > rhs.priority;
+                if (lhs.entry.credit != rhs.entry.credit)
+                    return lhs.entry.credit > rhs.entry.credit;
+                return lhs.move < rhs.move;
+            }
+        );
+
+        out << "info string msv d=" << depth;
+        const int count = std::min<int>(6, static_cast<int>(entries.size()));
+        for (int i = 0; i < count; ++i) {
+            const DebugEntry& e = entries[static_cast<std::size_t>(i)];
+            out << ' ' << move_to_uci(e.move)
+                << "[c=" << e.entry.credit
+                << ",h=" << (e.entry.exactHits + e.entry.boundHits)
+                << ",w=" << e.entry.workerHits
+                << ",md=" << e.entry.maxDepth
+                << ",a=" << e.entry.activeWorkers
+                << ",p=" << e.priority
+                << ']';
+        }
+        out << '\n';
+    }
+
     [[nodiscard]] inline Move pick_next(ScoredMoveList& scored, int index) const noexcept {
         int best = index;
         for (int i = index + 1; i < scored.size; ++i)
@@ -3628,6 +4064,7 @@ struct Searcher {
 
         ScoredMoveList scored;
         score_moves(root, list, scored, root_hint, 0, depth);
+        apply_msv_root_order(root, scored, depth);
         int best_score = -VALUE_INF;
         result.best_move = 0;
 
@@ -3639,6 +4076,7 @@ struct Searcher {
 #if MAGNUS_SEARCHSTATS_OBS
             ++stats.root_moves_searched;
 #endif
+            RootMsvActiveGuard msv_active(limits, move);
             const RootMoveResult move_result =
                 search_root_move(root, move, depth, alpha, beta, i == 0);
             const int score = move_result.score;
@@ -4427,6 +4865,24 @@ void emit_iteration_info(
             capture_completed_result(result, best, searcher, current_score_bound);
         }
 
+        if (root_msv_enabled(searcher.limits) && !move_is_none(current.best_move)) {
+            const bool msv_stopped = searcher.stopped || searcher.hit_hard_limit();
+            const bool pv_valid =
+                searcher.pv_length[0] > 2 &&
+                searcher.pv_table[0][0] == current.best_move;
+            root_msv_record_completed(
+                searcher.limits,
+                current.best_move,
+                depth,
+                current.seldepth,
+                current.score,
+                current_score_bound,
+                msv_stopped,
+                pv_valid,
+                searcher.pv_length[0]
+            );
+        }
+
         const bool should_stop_for_time =
             !stopped_mid_depth &&
             should_stop_after_iteration(searcher, time_state, best, depth);
@@ -4461,6 +4917,7 @@ void emit_iteration_info(
                 depth,
                 current_score_bound
             );
+            searcher.emit_msv_info(*local_out, keyed_root, depth);
 #if MAGNUS_SEARCHSTATS_OBS
             emit_searchstats_line(
                 *local_out,
@@ -4794,6 +5251,13 @@ void emit_iteration_info(
     main_limits.stop = &shared_stop;
     main_limits.shared_nodes = &shared_nodes;
     main_limits.shared_tb_hits = &shared_tb_hits;
+    RootMsvShared root_msv_state{};
+    if (main_limits.use_msv_smp && main_limits.thread_count > 1) {
+        root_msv_seed_moves(root, mem, main_limits, root_msv_state);
+        main_limits.root_msv = &root_msv_state;
+    } else {
+        main_limits.root_msv = nullptr;
+    }
 
     Searcher main_searcher(mem, main_limits);
     const int worker_count = main_limits.thread_count;
@@ -4881,6 +5345,9 @@ void emit_iteration_info(
         recovery_limits.external_stop = limits.stop;
         recovery_limits.shared_nodes = &shared_nodes;
         recovery_limits.shared_tb_hits = &shared_tb_hits;
+        recovery_limits.use_msv_smp = false;
+        recovery_limits.msv_info = false;
+        recovery_limits.root_msv = nullptr;
 
         Searcher recovery_searcher(mem, recovery_limits);
         recovery_searcher.p2_accumulator_stack.reset();

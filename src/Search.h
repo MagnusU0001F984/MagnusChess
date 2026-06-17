@@ -25,6 +25,7 @@ SOFTWARE.
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 
@@ -61,6 +62,25 @@ constexpr int MAX_PLY = 246;
 constexpr int MAX_SEARCH_DEPTH = MAX_PLY - 1;
 constexpr int MAX_GAME_HISTORY = 128;
 
+struct RootMsvEntry {
+    int credit = 0;
+    int exactHits = 0;
+    int boundHits = 0;
+    int maxDepth = 0;
+    int maxSelDepth = 0;
+    int stableCount = 0;
+    std::uint64_t workerMask = 0;
+    int workerHits = 0;
+    int activeWorkers = 0;
+    int lastScore = 0;
+    memory::Bound lastBound = memory::BOUND_NONE;
+    bool pvValid = false;
+    int pvLength = 0;
+    bool stopped = false;
+};
+
+struct RootMsvShared;
+
 /*
  * SearchLimits — 搜尋限制參數集合
  *
@@ -96,6 +116,8 @@ struct SearchLimits {
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
     bool use_nnue = false;              // 是否使用 NNUE 神經網路評估
     bool singular_telemetry = false;    // 是否收集 singular extension contextual telemetry
+    bool use_msv_smp = false;           // Search-local MSV-SMP root scheduling credit
+    bool msv_info = false;              // Emit MSV-SMP debug info strings
 
     // --- 對局歷史（供重複局面檢測）---
     Key game_history_keys[MAX_GAME_HISTORY]{}; // 歷史局面的 Zobrist 鍵值
@@ -112,6 +134,7 @@ struct SearchLimits {
     const std::atomic<int>* ponder_time_offset_ms = nullptr;// 沉思時間偏移量
     std::atomic<u64>* shared_nodes = nullptr;               // 共享節點計數器
     std::atomic<u64>* shared_tb_hits = nullptr;             // 共享 Syzygy 命中計數器
+    RootMsvShared* root_msv = nullptr;                      // MSV-SMP root-local credit table
 
     // --- 線程資訊 ---
     int thread_id = 0;                  // 本線程的 ID（0 = 主線程）
