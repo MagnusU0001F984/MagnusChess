@@ -95,8 +95,8 @@ inline constexpr int IIR_MIN_DEPTH              = 6;
 inline constexpr int IMPROVING_MARGIN           = 16;
 
 // --- RFP (Reverse Futility Pruning) --------------------------
-inline constexpr int RFP_BASE_MARGIN               = 56;
-inline constexpr int RFP_DEPTH_MARGIN              = 72;
+inline constexpr int RFP_BASE_MARGIN               = 48;
+inline constexpr int RFP_DEPTH_MARGIN              = 64;
 inline constexpr int RFP_IMPROVING_MARGIN          = 40;
 inline constexpr int RFP_OPPONENT_WORSENING_MARGIN = 24;
 inline constexpr int RFP_CORRECTION_THRESHOLD      = 128;
