@@ -245,6 +245,7 @@ struct SearchLimits {
     // --- 引擎選項 ---
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
     bool use_nnue = false;              // 是否使用 NNUE 神經網路評估
+    bool full_pv = false;               // UCI info 的短 exact PV 是否從 TT chain 補全
     bool singular_telemetry = false;    // 是否收集 singular extension contextual telemetry
     bool use_msv_smp = false;           // Search-local MSV-SMP root scheduling credit
     bool msv_info = false;              // Emit MSV-SMP debug info strings

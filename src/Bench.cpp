@@ -81,6 +81,96 @@ struct SearchBenchResult {
     std::string ponder{};
 };
 
+struct TTBenchFingerprint {
+    Move move = 0;
+    i16 score = 0;
+    i16 eval = 0;
+    i16 depth = 0;
+};
+
+struct TTBenchProbeResult {
+    u64 hits = 0;
+    u64 misses = 0;
+    u64 false_hits = 0;
+    u64 checksum = 0;
+    double seconds = 0.0;
+};
+
+[[nodiscard]] inline Key tt_bench_key(u64 ordinal) noexcept {
+    return mix64(0xA0761D6478BD642FULL + ordinal);
+}
+
+[[nodiscard]] inline TTBenchFingerprint tt_bench_fingerprint(Key key) noexcept {
+    const u64 signature = mix64(key ^ 0xE7037ED1A0B428DBULL);
+    TTBenchFingerprint fingerprint{};
+    fingerprint.move = static_cast<Move>(
+        static_cast<u16>(signature) | static_cast<u16>(1)
+    );
+    fingerprint.score = static_cast<i16>(signature >> 16);
+    fingerprint.eval = static_cast<i16>(signature >> 32);
+    fingerprint.depth = static_cast<i16>(1 + ((signature >> 48) & 0x7FFFULL));
+    return fingerprint;
+}
+
+[[nodiscard]] inline bool tt_bench_payload_matches(
+    const memory::TTData& data,
+    const TTBenchFingerprint& expected
+) noexcept {
+    return data.move == expected.move &&
+           data.score == expected.score &&
+           data.eval == expected.eval &&
+           data.depth == expected.depth &&
+           (data.flags & 0x3U) == memory::BOUND_EXACT;
+}
+
+[[nodiscard]] inline double tt_bench_mops(u64 operations, double seconds) noexcept {
+    return seconds > 0.0
+        ? static_cast<double>(operations) / seconds / 1'000'000.0
+        : 0.0;
+}
+
+[[nodiscard]] inline double tt_bench_percent(u64 count, u64 total) noexcept {
+    return total > 0
+        ? 100.0 * static_cast<double>(count) / static_cast<double>(total)
+        : 0.0;
+}
+
+[[nodiscard]] TTBenchProbeResult benchmark_tt_probes(
+    memory::TT& tt,
+    u64 first_ordinal,
+    u64 count,
+    bool keys_were_inserted
+) {
+    using clock = std::chrono::steady_clock;
+
+    TTBenchProbeResult result{};
+    const auto start = clock::now();
+    for (u64 i = 0; i < count; ++i) {
+        const Key key = tt_bench_key(first_ordinal + i);
+        const memory::TTProbe probe = memory::tt_probe(tt, key);
+        if (!probe.hit) {
+            ++result.misses;
+            continue;
+        }
+
+        result.checksum +=
+            static_cast<u64>(probe.data.move) +
+            static_cast<u64>(static_cast<u16>(probe.data.score)) +
+            static_cast<u64>(static_cast<u16>(probe.data.eval)) +
+            static_cast<u64>(static_cast<u16>(probe.data.depth));
+
+        if (keys_were_inserted &&
+            tt_bench_payload_matches(probe.data, tt_bench_fingerprint(key))) {
+            ++result.hits;
+        } else {
+            ++result.false_hits;
+        }
+    }
+    const auto end = clock::now();
+    result.seconds = std::chrono::duration<double>(end - start).count();
+    return result;
+}
+
 [[nodiscard]] bool ensure_nnue_loaded(
     const std::string& eval_file,
     std::ostream* out
@@ -548,6 +638,120 @@ PerftBenchResult benchmark_perft(
     return r;
 }
 
+bool run_tt_bench(
+    std::size_t hash_mb,
+    u64 entries,
+    std::ostream& out
+) {
+    using clock = std::chrono::steady_clock;
+
+    memory::TT tt{};
+    memory::tt_resize_mb(tt, hash_mb);
+    const u64 slot_count =
+        static_cast<u64>(tt.cluster_count) * 4ULL;
+    const u64 operation_count = entries > 0 ? entries : slot_count;
+    const u64 allocated_bytes =
+        static_cast<u64>(tt.cluster_count) * sizeof(memory::TTCluster);
+
+    const auto clear_start = clock::now();
+    memory::tt_clear(tt);
+    const auto clear_end = clock::now();
+    const double clear_seconds =
+        std::chrono::duration<double>(clear_end - clear_start).count();
+
+    const auto store_start = clock::now();
+    for (u64 i = 0; i < operation_count; ++i) {
+        const Key key = tt_bench_key(i);
+        const TTBenchFingerprint payload = tt_bench_fingerprint(key);
+        memory::tt_save(
+            tt,
+            key,
+            payload.move,
+            payload.score,
+            payload.eval,
+            payload.depth,
+            memory::BOUND_EXACT,
+            false
+        );
+    }
+    const auto store_end = clock::now();
+    const double store_seconds =
+        std::chrono::duration<double>(store_end - store_start).count();
+
+    const TTBenchProbeResult inserted =
+        benchmark_tt_probes(tt, 0, operation_count, true);
+    const TTBenchProbeResult absent =
+        benchmark_tt_probes(tt, operation_count, operation_count, false);
+
+    u64 occupied_slots = 0;
+    u64 empty_clusters = 0;
+    u64 full_clusters = 0;
+    for (std::size_t cluster_index = 0;
+         cluster_index < tt.cluster_count;
+         ++cluster_index) {
+        int occupancy = 0;
+        const memory::TTCluster& cluster = tt.clusters[cluster_index];
+        for (int lane = 0; lane < 4; ++lane)
+            occupancy += memory::tt_cluster_load(cluster, lane).age != 0;
+        occupied_slots += static_cast<u64>(occupancy);
+        empty_clusters += occupancy == 0;
+        full_clusters += occupancy == 4;
+    }
+
+    const u64 unavailable = inserted.misses + inserted.false_hits;
+    out << std::fixed << std::setprecision(3);
+    out << "tt benchmark\n";
+    out << "  requested hash mb    : " << hash_mb << '\n';
+    out << "  allocated hash mb    : "
+        << static_cast<double>(allocated_bytes) / (1024.0 * 1024.0) << '\n';
+    out << "  cluster bytes        : " << sizeof(memory::TTCluster) << '\n';
+    out << "  clusters             : " << tt.cluster_count << '\n';
+    out << "  slots (4-way)        : " << slot_count << '\n';
+    out << "  inserted entries     : " << operation_count << '\n';
+    out << "  nominal load         : "
+        << tt_bench_percent(operation_count, slot_count) << " %\n";
+    out << '\n';
+    out << "speed\n";
+    out << "  clear time           : " << clear_seconds * 1000.0 << " ms\n";
+    out << "  store                : " << tt_bench_mops(operation_count, store_seconds)
+        << " Mops/s (" << store_seconds * 1000.0 << " ms)\n";
+    out << "  probe inserted       : " << tt_bench_mops(operation_count, inserted.seconds)
+        << " Mops/s (" << inserted.seconds * 1000.0 << " ms)\n";
+    out << "  probe absent         : " << tt_bench_mops(operation_count, absent.seconds)
+        << " Mops/s (" << absent.seconds * 1000.0 << " ms)\n";
+    out << '\n';
+    out << "occupancy\n";
+    out << "  occupied slots       : " << occupied_slots
+        << " (" << tt_bench_percent(occupied_slots, slot_count) << " %)\n";
+    out << "  empty clusters       : " << empty_clusters
+        << " (" << tt_bench_percent(
+            empty_clusters,
+            static_cast<u64>(tt.cluster_count)
+        ) << " %)\n";
+    out << "  full clusters        : " << full_clusters
+        << " (" << tt_bench_percent(
+            full_clusters,
+            static_cast<u64>(tt.cluster_count)
+        ) << " %)\n";
+    out << '\n';
+    out << "collisions and retention\n";
+    out << "  retained hits        : " << inserted.hits
+        << " (" << tt_bench_percent(inserted.hits, operation_count) << " %)\n";
+    out << "  replacement misses   : " << inserted.misses
+        << " (" << tt_bench_percent(inserted.misses, operation_count) << " %)\n";
+    out << "  inserted false hits  : " << inserted.false_hits
+        << " (" << tt_bench_percent(inserted.false_hits, operation_count) << " %)\n";
+    out << "  total unavailable    : " << unavailable
+        << " (" << tt_bench_percent(unavailable, operation_count) << " %)\n";
+    out << "  absent false hits    : " << absent.false_hits
+        << " (" << tt_bench_percent(absent.false_hits, operation_count) << " %)\n";
+    out << "  probe checksum       : "
+        << (inserted.checksum ^ absent.checksum) << '\n';
+
+    memory::tt_free(tt);
+    return true;
+}
+
 bool run_search_bench(
     memory::Memory& mem,
     int depth,
@@ -772,6 +976,13 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         cfg.evalbench = true;
         argi = 2;
     }
+    else if (argc > 1 &&
+             (std::string_view(argv[1]) == "-tt" ||
+              std::string_view(argv[1]) == "--tt" ||
+              std::string_view(argv[1]) == "tt")) {
+        cfg.tt_bench = true;
+        argi = 2;
+    }
 
     auto parse_arg_int = [&](int idx, int default_val) noexcept {
         if (idx >= argc || !argv[idx] || !argv[idx][0])
@@ -792,7 +1003,37 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
         return default_val;
     };
 
-    if (cfg.evalbench) {
+    if (cfg.tt_bench) {
+        for (int i = argi; i < argc; ++i) {
+            const std::string_view option(argv[i]);
+            if (option == "-hash" || option == "--hash") {
+                if (++i >= argc) {
+                    cfg.valid = false;
+                    break;
+                }
+                const std::size_t parsed = parse_arg_u64(i, 0);
+                if (parsed == 0) {
+                    cfg.valid = false;
+                    break;
+                }
+                cfg.hash_mb = parsed;
+            } else if (option == "-entries" || option == "--entries") {
+                if (++i >= argc) {
+                    cfg.valid = false;
+                    break;
+                }
+                cfg.tt_entries = static_cast<u64>(parse_arg_u64(i, 0));
+                if (cfg.tt_entries == 0) {
+                    cfg.valid = false;
+                    break;
+                }
+            } else {
+                cfg.valid = false;
+                break;
+            }
+        }
+        cfg.threads = 1;
+    } else if (cfg.evalbench) {
         cfg.eval_iterations = std::max(1, parse_arg_int(argi, cfg.eval_iterations));
         cfg.hash_mb = parse_arg_u64(argi + 1, cfg.hash_mb);
         cfg.threads = 1;
@@ -845,9 +1086,13 @@ int run_bench(int argc, char** argv) {
             << "usage: MagnusChess [perft] <depth> <hash_mb> <threads> "
                "[auto|pext|magic|table|classical]\n"
             << "       MagnusChess divide <depth> <hash_mb> <threads> "
-               "[live] [auto|pext|magic|table|classical]\n";
+               "[live] [auto|pext|magic|table|classical]\n"
+            << "       MagnusChess -tt -hash <mb> [-entries <count>]\n";
         return 1;
     }
+
+    if (cfg.tt_bench)
+        return run_tt_bench(cfg.hash_mb, cfg.tt_entries, std::cout) ? 0 : 1;
 
     memory::Memory mem{};
     memory_init(mem, cfg.hash_mb, 8, 2);

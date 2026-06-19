@@ -63,9 +63,11 @@ struct BenchConfig {
     int search_movetime_ms = DEFAULT_BENCH_MOVETIME_MS;
     int eval_iterations = 20000;
     std::size_t hash_mb = 16ULL;
+    std::uint64_t tt_entries = 0;
     std::size_t threads = 1ULL;
     bool divide = false;
     bool evalbench = false;
+    bool tt_bench = false;
     bool search = false;
     bool timed_search = false;
     bool live_divide = false;
@@ -106,6 +108,12 @@ void set_start_position(Position& pos) noexcept;
     std::size_t threads,
     bool use_nnue,
     bool emit_ponder,
+    std::ostream& out
+);
+
+[[nodiscard]] bool run_tt_bench(
+    std::size_t hash_mb,
+    std::uint64_t entries,
     std::ostream& out
 );
 

@@ -4400,6 +4400,98 @@ struct IterativeWorkerResult {
     memory::Bound score_bound = memory::BOUND_EXACT;
 };
 
+[[nodiscard]] bool pv_move_is_legal(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return false;
+
+    MoveList legal{};
+    generate_legal(pos, mem, legal);
+    for (int i = 0; i < legal.size; ++i)
+        if (legal.moves[i] == move)
+            return true;
+
+    return false;
+}
+
+[[nodiscard]] int reconstruct_tt_pv(
+    Position& root,
+    memory::Memory& mem,
+    const SearchLimits& limits,
+    Move first_move,
+    Move* out,
+    int max_len
+) noexcept {
+    if (move_is_none(first_move) || out == nullptr || max_len <= 0)
+        return 0;
+
+    const int length_limit = std::clamp(max_len, 0, MAX_PLY);
+    std::array<StateInfo, MAX_PLY> states{};
+    std::array<Move, MAX_PLY> made_moves{};
+    std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 1> keys{};
+    int key_count = 0;
+
+    const int history_count =
+        std::min(limits.game_history_count, MAX_GAME_HISTORY);
+    for (int i = 0; i < history_count; ++i)
+        keys[static_cast<std::size_t>(key_count++)] = limits.game_history_keys[i];
+    keys[static_cast<std::size_t>(key_count++)] = root.key;
+
+    int pv_length = 0;
+    while (pv_length < length_limit) {
+        const Move move = pv_length == 0
+            ? first_move
+            : [&]() noexcept {
+                const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
+                return probe.hit
+                    ? static_cast<Move>(probe.data.move)
+                    : Move(0);
+            }();
+
+        if (!pv_move_is_legal(root, mem, move))
+            break;
+
+        out[pv_length] = move;
+        made_moves[static_cast<std::size_t>(pv_length)] = move;
+        make_move(
+            root,
+            move,
+            mem.tables,
+            states[static_cast<std::size_t>(pv_length)]
+        );
+        ++pv_length;
+
+        if (root.halfmove_clock >= 100)
+            break;
+
+        bool repeated = false;
+        for (int i = 0; i < key_count; ++i) {
+            if (keys[static_cast<std::size_t>(i)] == root.key) {
+                repeated = true;
+                break;
+            }
+        }
+        if (repeated)
+            break;
+
+        keys[static_cast<std::size_t>(key_count++)] = root.key;
+    }
+
+    for (int i = pv_length - 1; i >= 0; --i) {
+        unmake_move(
+            root,
+            made_moves[static_cast<std::size_t>(i)],
+            mem.tables,
+            states[static_cast<std::size_t>(i)]
+        );
+    }
+
+    return pv_length;
+}
+
 [[nodiscard]] bool pv_contains_key(
     const std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 2>& keys,
     int key_count,
@@ -4734,6 +4826,34 @@ void emit_iteration_info(
             }
 
             break;
+        }
+
+        if (searcher.limits.full_pv &&
+            !searcher.stopped &&
+            current_score_bound == memory::BOUND_EXACT &&
+            searcher.pv_length[0] <= 1 &&
+            !move_is_none(current.best_move)) {
+            Position tt_pv_root{};
+            position_copy_without_accumulators(tt_pv_root, keyed_root);
+
+            Move rebuilt_pv[MAX_PLY]{};
+            const int rebuilt_length = reconstruct_tt_pv(
+                tt_pv_root,
+                searcher.mem,
+                searcher.limits,
+                current.best_move,
+                rebuilt_pv,
+                std::min(depth, MAX_PLY)
+            );
+            if (rebuilt_length > searcher.pv_length[0] &&
+                rebuilt_pv[0] == current.best_move) {
+                std::memcpy(
+                    searcher.pv_table[0],
+                    rebuilt_pv,
+                    static_cast<std::size_t>(rebuilt_length) * sizeof(Move)
+                );
+                searcher.pv_length[0] = rebuilt_length;
+            }
         }
 
         if (!searcher.stopped && !move_is_none(current.best_move)) {

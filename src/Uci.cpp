@@ -900,6 +900,7 @@ struct UciSession {
     timeman::TimeManager time_manager{};
     bool use_nnue = true;
     bool enable_ponder = true;
+    bool full_pv = false;
     bool singular_telemetry = false;
     bool use_msv_smp = false;
     bool msv_info = false;
@@ -1022,6 +1023,7 @@ struct UciSession {
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
+        out << "option name FullPV type check default false\n";
         out << "option name Singular Telemetry type check default false\n";
         out << "option name UseMsvSmp type check default false\n";
         out << "option name MsvInfo type check default false\n";
@@ -1191,6 +1193,11 @@ struct UciSession {
             bool parsed = false;
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
+        }
+        else if (name == "FullPV") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                full_pv = parsed;
         }
         else if (name == "Singular Telemetry") {
             bool parsed = false;
@@ -1629,6 +1636,7 @@ struct UciSession {
         }
 
         limits.contempt = contempt;
+        limits.full_pv = full_pv;
         limits.singular_telemetry = singular_telemetry;
         limits.use_msv_smp = use_msv_smp;
         limits.msv_info = msv_info;
