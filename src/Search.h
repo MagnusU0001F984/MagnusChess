@@ -25,6 +25,7 @@ SOFTWARE.
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <iosfwd>
 #include <string>
 
@@ -53,11 +54,162 @@ namespace magnus::search {
 
 /*
  * 搜尋層全局常數：
- *   MAX_PLY            — 最大搜索深度（半步數），用於所有棧陣列的固定尺寸
+ *   MAX_PLY            — Stockfish-style search stack ply budget
+ *   MAX_SEARCH_DEPTH   — maximum completed root depth reported by iterative deepening
  *   MAX_GAME_HISTORY   — 最大對局歷史記錄數，用於重複局面檢測
  */
-constexpr int MAX_PLY = 128;
+constexpr int MAX_PLY = 246;
+constexpr int MAX_SEARCH_DEPTH = MAX_PLY - 1;
 constexpr int MAX_GAME_HISTORY = 128;
+
+// ============================================================
+// Search Tuning Parameters — every numeric knob in one place
+// ============================================================
+// inline constexpr → zero runtime overhead, each .cpp that
+// includes this header gets its own copy; the optimizer folds.
+//
+// Sections mirror the search execution order inside pvs().
+// Conservative adjustment: ±10 % then test. ±50 % will break.
+// ============================================================
+
+// --- Value / Score Bounds ------------------------------------
+inline constexpr int VALUE_INF                  = 32000;
+inline constexpr int VALUE_MATE                 = 31000;
+inline constexpr int VALUE_TB                   = 30000;
+inline constexpr int VALUE_NONE                 = 32002;
+inline constexpr int VALUE_MATE_IN_MAX_PLY      = VALUE_MATE - MAX_PLY;
+inline constexpr int VALUE_MATED_IN_MAX_PLY     = -VALUE_MATE_IN_MAX_PLY;
+inline constexpr int VALUE_TB_WIN_IN_MAX_PLY    = VALUE_TB - MAX_PLY;
+inline constexpr int VALUE_TB_LOSS_IN_MAX_PLY   = -VALUE_TB_WIN_IN_MAX_PLY;
+
+// --- Aspiration ----------------------------------------------
+inline constexpr int ASPIRATION_DELTA           = 24;
+
+// --- Repetition ----------------------------------------------
+inline constexpr int REPETITION_AVOID_BASE      = 16;
+
+// --- IIR (Internal Iterative Deepening) ----------------------
+inline constexpr int IIR_MIN_DEPTH              = 6;
+
+// --- Improving detection -------------------------------------
+inline constexpr int IMPROVING_MARGIN           = 16;
+
+// --- RFP (Reverse Futility Pruning) --------------------------
+inline constexpr int RFP_BASE_MARGIN               = 48;
+inline constexpr int RFP_DEPTH_MARGIN              = 64;
+inline constexpr int RFP_IMPROVING_MARGIN          = 40;
+inline constexpr int RFP_OPPONENT_WORSENING_MARGIN = 24;
+inline constexpr int RFP_CORRECTION_THRESHOLD      = 128;
+inline constexpr int RFP_CORRECTION_MARGIN_BONUS    = 8;
+inline constexpr int RFP_TT_CAPTURE_MARGIN_REDUCTION = 16;
+inline constexpr int RFP_TT_QUIET_FAIL_HIGH_BONUS   = 24;
+
+// --- Razoring -------------------------------------------------
+inline constexpr int RAZOR_MARGIN[3]            = { 0, 280, 420 };
+
+// --- NMP (Null Move Pruning) ---------------------------------
+inline constexpr int NMP_STATIC_BASE            = 160;
+inline constexpr int NMP_STATIC_DEPTH_SLOPE     = 8;
+inline constexpr int NMP_IMPROVING_MARGIN       = 64;
+inline constexpr int NMP_EVAL_BUCKET            = 96;
+inline constexpr int NMP_MIN_REDUCTION          = 2;
+inline constexpr int NMP_VERIFICATION_MIN_DEPTH = 16;
+inline constexpr int NMP_VERIFICATION_MIN_SPAN  = 2;
+
+// --- Futility Pruning ----------------------------------------
+inline constexpr int FUTILITY_BASE_MARGIN       = 72;
+inline constexpr int FUTILITY_DEPTH_MARGIN      = 72;
+inline constexpr int FUTILITY_IMPROVING_MARGIN  = 24;
+inline constexpr int FUTILITY_HISTORY_DIVISOR   = 128;
+
+// --- SEE Pruning ---------------------------------------------
+inline constexpr int SEE_PRUNE_DEPTH_LIMIT      = 6;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH        = 4;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH        = 8;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
+
+// --- Delta / QS ----------------------------------------------
+inline constexpr int DELTA_MARGIN               = 200;
+inline constexpr int QS_ADJ_SHUFFLE_CAP         = 80;
+
+// --- ProbCut -------------------------------------------------
+inline constexpr int PROBCUT_MIN_DEPTH          = 5;
+inline constexpr int PROBCUT_MARGIN             = 224;
+inline constexpr int PROBCUT_REDUCTION          = 5;
+inline constexpr int PROBCUT_TT_DEPTH_MARGIN    = 3;
+
+// --- Capture History / Top-K ---------------------------------
+inline constexpr int CAPTURE_HISTORY_HIGH_THRESHOLD = 128;
+inline constexpr int CAPTURE_TOPK               = 3;
+
+// --- Singular Extension --------------------------------------
+inline constexpr int SINGULAR_MIN_DEPTH               = 8;
+inline constexpr int SINGULAR_TT_DEPTH_MARGIN         = 3;
+inline constexpr int SINGULAR_MARGIN_BASE             = 24;
+inline constexpr int SINGULAR_MARGIN_PER_DEPTH        = 4;
+inline constexpr int SINGULAR_DOUBLE_MARGIN_BASE      = 48;
+inline constexpr int SINGULAR_DOUBLE_MARGIN_PER_DEPTH = 8;
+inline constexpr int SINGULAR_DOUBLE_MIN_DEPTH        = 12;
+inline constexpr int SINGULAR_TRIPLE_MARGIN_BASE      = 72;
+inline constexpr int SINGULAR_TRIPLE_MARGIN_PER_DEPTH = 12;
+inline constexpr int SINGULAR_TRIPLE_MIN_DEPTH        = 18;
+inline constexpr int SINGULAR_SCORE_NEAR_BETA         = 32;
+inline constexpr int SINGULAR_SCORE_STRONG            = 64;
+inline constexpr int SINGULAR_GOOD_HISTORY            = 1024;
+inline constexpr int SINGULAR_RECENT_EXTENSION_PLIES  = 8;
+inline constexpr int SINGULAR_RECENT_EXTENSION_LIMIT  = 3;
+inline constexpr int SINGULAR_COST_RATIO_PERCENT      = 5;
+inline constexpr u64  SINGULAR_COST_GATE_MIN_NODES    = 4096;
+inline constexpr std::size_t SINGULAR_NODE_KINDS      = 3;
+inline constexpr std::size_t SINGULAR_DEPTH_BANDS     = 3;
+inline constexpr std::size_t SINGULAR_SCORE_BANDS     = 3;
+inline constexpr std::size_t SINGULAR_TELEMETRY_BUCKETS =
+    SINGULAR_NODE_KINDS * SINGULAR_DEPTH_BANDS * SINGULAR_SCORE_BANDS;
+inline constexpr std::size_t SINGULAR_TELEMETRY_EXTENSION_LEVELS = 3;
+inline constexpr int SINGULAR_TRUST_THRESHOLDS[SINGULAR_NODE_KINDS] = { 6, 6, 9 };
+
+// --- Correction History --------------------------------------
+inline constexpr int CORRECTION_HISTORY_SIZE        = 16384;
+inline constexpr int CORRECTION_HISTORY_GRAIN       = 16;
+inline constexpr int CORRECTION_HISTORY_CLAMP       = 256;
+inline constexpr int CORRECTION_HISTORY_WEIGHT_MAX  = 96;
+inline constexpr int CORRECTION_POSITION_WEIGHT     = 2;
+inline constexpr int CORRECTION_PAWN_WEIGHT         = 2;
+inline constexpr int CORRECTION_MATERIAL_WEIGHT     = 1;
+inline constexpr int CORRECTION_WEIGHT_SUM =
+    CORRECTION_POSITION_WEIGHT
+    + CORRECTION_PAWN_WEIGHT
+    + CORRECTION_MATERIAL_WEIGHT;
+
+// --- LMR (Late Move Reduction) -------------------------------
+inline constexpr int FP_ONE_PLY                    = 1024;
+inline constexpr int LMR_TABLE_MAX_INDEX           = 64;
+inline constexpr double LMR_TABLE_LOG_SCALE        = 2747.0 / 128.0;
+inline constexpr int QUIET_HISTORY_FP_DIVISOR      = 12;
+inline constexpr int CAPTURE_HISTORY_FP_DIVISOR    = 16;
+inline constexpr int LMR_DEEPER_RESEARCH_MARGIN    = 96;
+inline constexpr int LMR_SHALLOWER_RESEARCH_MARGIN = 8;
+
+// ============================================================
+
+struct RootMsvEntry {
+    int credit = 0;
+    int exactHits = 0;
+    int boundHits = 0;
+    int maxDepth = 0;
+    int maxSelDepth = 0;
+    int stableCount = 0;
+    std::uint64_t workerMask = 0;
+    int workerHits = 0;
+    int activeWorkers = 0;
+    int lastScore = 0;
+    memory::Bound lastBound = memory::BOUND_NONE;
+    bool pvValid = false;
+    int pvLength = 0;
+    bool stopped = false;
+};
+
+struct RootMsvShared;
 
 /*
  * SearchLimits — 搜尋限制參數集合
@@ -73,7 +225,7 @@ constexpr int MAX_GAME_HISTORY = 128;
  */
 struct SearchLimits {
     // --- 搜尋深度與節點限制 ---
-    int depth = MAX_PLY;                // 最大搜索深度（ply），預設為無限
+    int depth = MAX_SEARCH_DEPTH;       // 最大搜索深度（ply），預設為無限
     u64 node_limit = 0;                 // 最大節點數限制，0 表示無限制
 
     // --- 時間控制 ---
@@ -94,6 +246,8 @@ struct SearchLimits {
     int contempt = 0;                   // 輕視值：正值傾向避免和棋，負值傾向接受和棋
     bool use_nnue = false;              // 是否使用 NNUE 神經網路評估
     bool singular_telemetry = false;    // 是否收集 singular extension contextual telemetry
+    bool use_msv_smp = false;           // Search-local MSV-SMP root scheduling credit
+    bool msv_info = false;              // Emit MSV-SMP debug info strings
 
     // --- 對局歷史（供重複局面檢測）---
     Key game_history_keys[MAX_GAME_HISTORY]{}; // 歷史局面的 Zobrist 鍵值
@@ -110,6 +264,7 @@ struct SearchLimits {
     const std::atomic<int>* ponder_time_offset_ms = nullptr;// 沉思時間偏移量
     std::atomic<u64>* shared_nodes = nullptr;               // 共享節點計數器
     std::atomic<u64>* shared_tb_hits = nullptr;             // 共享 Syzygy 命中計數器
+    RootMsvShared* root_msv = nullptr;                      // MSV-SMP root-local credit table
 
     // --- 線程資訊 ---
     int thread_id = 0;                  // 本線程的 ID（0 = 主線程）

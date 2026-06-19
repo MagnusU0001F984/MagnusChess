@@ -32,6 +32,7 @@ SOFTWARE.
 #include <cstring>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -88,88 +89,18 @@ SOFTWARE.
 
 namespace magnus::search {
 
-namespace {
+struct RootMsvShared {
+    struct Record {
+        Move move = 0;
+        RootMsvEntry entry{};
+        int lastPriority = 0;
+    };
 
-// Pruning and reduction margins — tuned via SPSA / Texel tuning.
-// Small fixed margins keep the implementation simple and the runtime overhead low.
-constexpr int VALUE_INF = 32000;
-constexpr int VALUE_MATE = 31000;
-constexpr int VALUE_TB = 30000;
-constexpr int VALUE_NONE = 32002;
-constexpr int VALUE_MATE_IN_MAX_PLY = VALUE_MATE - MAX_PLY;
-constexpr int VALUE_MATED_IN_MAX_PLY = -VALUE_MATE_IN_MAX_PLY;
-constexpr int VALUE_TB_WIN_IN_MAX_PLY = VALUE_TB - MAX_PLY;
-constexpr int VALUE_TB_LOSS_IN_MAX_PLY = -VALUE_TB_WIN_IN_MAX_PLY;
-constexpr int DELTA_MARGIN = 200;
-constexpr int QS_ADJ_SHUFFLE_CAP = 80;
-constexpr int FUTILITY_BASE_MARGIN = 72;
-constexpr int FUTILITY_DEPTH_MARGIN = 72;
-constexpr int FUTILITY_IMPROVING_MARGIN = 24;
-constexpr int FUTILITY_HISTORY_DIVISOR = 128;
-constexpr int RFP_BASE_MARGIN = 56;
-constexpr int RFP_DEPTH_MARGIN = 72;
-constexpr int RFP_IMPROVING_MARGIN = 40;
-constexpr int RFP_OPPONENT_WORSENING_MARGIN = 24;
-constexpr int RFP_CORRECTION_THRESHOLD = 128;
-constexpr int RFP_CORRECTION_MARGIN_BONUS = 8;
-constexpr int RFP_TT_CAPTURE_MARGIN_REDUCTION = 16;
-constexpr int RFP_TT_QUIET_FAIL_HIGH_BONUS = 24;
-constexpr int RAZOR_MARGIN[3] = { 0, 280, 420 };
-constexpr int ASPIRATION_DELTA = 24;
-constexpr int REPETITION_AVOID_BASE = 16;
-constexpr int IIR_MIN_DEPTH = 6;
-constexpr int SEE_PRUNE_DEPTH_LIMIT = 6;
-constexpr int IMPROVING_MARGIN = 16;
-constexpr int CAPTURE_HISTORY_HIGH_THRESHOLD = 128;
-constexpr int CAPTURE_TOPK = 3;
-constexpr int PROBCUT_MIN_DEPTH = 5;
-constexpr int PROBCUT_MARGIN = 224;
-constexpr int PROBCUT_REDUCTION = 5;
-constexpr int PROBCUT_TT_DEPTH_MARGIN = 3;
-
-constexpr int SINGULAR_MIN_DEPTH = 8;
-constexpr int SINGULAR_TT_DEPTH_MARGIN = 3;
-constexpr int SINGULAR_MARGIN_BASE = 24;
-constexpr int SINGULAR_MARGIN_PER_DEPTH = 4;
-constexpr int SINGULAR_DOUBLE_MARGIN_BASE = 48;
-constexpr int SINGULAR_DOUBLE_MARGIN_PER_DEPTH = 8;
-constexpr int SINGULAR_DOUBLE_MIN_DEPTH = 12;
-constexpr int SINGULAR_TRIPLE_MARGIN_BASE = 72;
-constexpr int SINGULAR_TRIPLE_MARGIN_PER_DEPTH = 12;
-constexpr int SINGULAR_TRIPLE_MIN_DEPTH = 18;
-constexpr int SINGULAR_SCORE_NEAR_BETA = 32;
-constexpr int SINGULAR_SCORE_STRONG = 64;
-constexpr int SINGULAR_GOOD_HISTORY = 1024;
-constexpr int SINGULAR_RECENT_EXTENSION_PLIES = 8;
-constexpr int SINGULAR_RECENT_EXTENSION_LIMIT = 3;
-constexpr int SINGULAR_COST_RATIO_PERCENT = 5;
-constexpr u64 SINGULAR_COST_GATE_MIN_NODES = 4096;
-constexpr std::size_t SINGULAR_NODE_KINDS = 3;
-constexpr std::size_t SINGULAR_DEPTH_BANDS = 3;
-constexpr std::size_t SINGULAR_SCORE_BANDS = 3;
-constexpr std::size_t SINGULAR_TELEMETRY_BUCKETS =
-    SINGULAR_NODE_KINDS * SINGULAR_DEPTH_BANDS * SINGULAR_SCORE_BANDS;
-constexpr std::size_t SINGULAR_TELEMETRY_EXTENSION_LEVELS = 3;
-constexpr int SINGULAR_TRUST_THRESHOLDS[SINGULAR_NODE_KINDS] = {
-    6, // PV
-    6, // cut-like
-    9  // all-like
+    std::mutex mutex;
+    std::vector<Record> records;
 };
 
-constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH = 4;
-constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH = 8;
-constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
-constexpr int CORRECTION_HISTORY_SIZE = 16384;
-constexpr int CORRECTION_HISTORY_GRAIN = 16;
-constexpr int CORRECTION_HISTORY_CLAMP = 256;
-constexpr int CORRECTION_HISTORY_WEIGHT_MAX = 96;
-constexpr int CORRECTION_POSITION_WEIGHT = 2;
-constexpr int CORRECTION_PAWN_WEIGHT = 2;
-constexpr int CORRECTION_MATERIAL_WEIGHT = 1;
-constexpr int CORRECTION_WEIGHT_SUM =
-    CORRECTION_POSITION_WEIGHT
-    + CORRECTION_PAWN_WEIGHT
-    + CORRECTION_MATERIAL_WEIGHT;
+namespace {
 
 [[nodiscard]] constexpr bool is_valid_score(int score) noexcept {
     return score != VALUE_NONE;
@@ -312,21 +243,46 @@ enum class ScoreModel {
     return victim_value * 32 - attacker_value;
 }
 
+[[nodiscard]] inline memory::Bound score_bound_from_window(
+    int score,
+    int alpha,
+    int beta
+) noexcept {
+    if (score <= alpha)
+        return memory::BOUND_UPPER;
+    if (score >= beta)
+        return memory::BOUND_LOWER;
+    return memory::BOUND_EXACT;
+}
+
+inline void append_uci_score_bound(
+    std::ostream& out,
+    memory::Bound bound
+) {
+    if (bound == memory::BOUND_UPPER)
+        out << " upperbound";
+    else if (bound == memory::BOUND_LOWER)
+        out << " lowerbound";
+}
+
 inline void append_uci_score(
     std::ostream& out,
     int score,
     const Position& root,
-    ScoreModel score_model
+    ScoreModel score_model,
+    memory::Bound bound
 ) {
     if (score >= VALUE_MATE - MAX_PLY) {
         const int plies_to_mate = VALUE_MATE - score;
         out << "score mate " << ((plies_to_mate + 1) / 2);
+        append_uci_score_bound(out, bound);
         return;
     }
 
     if (score <= -VALUE_MATE + MAX_PLY) {
         const int plies_to_mate = VALUE_MATE + score;
         out << "score mate -" << ((plies_to_mate + 1) / 2);
+        append_uci_score_bound(out, bound);
         return;
     }
 
@@ -336,8 +292,9 @@ inline void append_uci_score(
         const int distance = VALUE_TB - std::abs(score);
         const int display_score =
             score > 0 ? TB_CP - distance : -TB_CP + distance;
-        out << "score cp " << display_score
-            << " wdl "
+        out << "score cp " << display_score;
+        append_uci_score_bound(out, bound);
+        out << " wdl "
             << (score > 0 ? "1000 0 0" : "0 0 1000");
         return;
     }
@@ -348,6 +305,7 @@ inline void append_uci_score(
     else if (score_model == ScoreModel::Nnue)
         display_score = nnue::search_score_to_cp(score, root);
     out << "score cp " << display_score;
+    append_uci_score_bound(out, bound);
 
     if (score_model == ScoreModel::Mnue) {
         const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
@@ -356,6 +314,277 @@ inline void append_uci_score(
         const nnue::WdlTriplet wdl = nnue::search_score_to_wdl(score, root);
         out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
     }
+}
+
+[[nodiscard]] inline bool root_msv_enabled(
+    const SearchLimits& limits
+) noexcept {
+    return limits.use_msv_smp &&
+           limits.thread_count > 1 &&
+           limits.root_msv != nullptr;
+}
+
+[[nodiscard]] RootMsvShared::Record* root_msv_find_locked(
+    RootMsvShared& shared,
+    Move move
+) noexcept {
+    for (RootMsvShared::Record& record : shared.records)
+        if (record.move == move)
+            return &record;
+    return nullptr;
+}
+
+void root_msv_seed_moves(
+    const Position& root,
+    const memory::Memory& mem,
+    const SearchLimits& limits,
+    RootMsvShared& shared
+) {
+    MoveList list{};
+    generate_legal(root, mem, list);
+
+    if (limits.root_move_count > 0) {
+        MoveList filtered{};
+        for (int i = 0; i < list.size; ++i) {
+            const Move move = list.moves[i];
+            bool allowed = false;
+            for (int j = 0; j < limits.root_move_count; ++j) {
+                if (limits.root_moves[j] == move) {
+                    allowed = true;
+                    break;
+                }
+            }
+            if (allowed)
+                filtered.moves[filtered.size++] = move;
+        }
+        list = filtered;
+    }
+
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    shared.records.clear();
+    shared.records.reserve(static_cast<std::size_t>(list.size));
+    for (int i = 0; i < list.size; ++i) {
+        const Move move = list.moves[i];
+        const auto duplicate = std::find_if(
+            shared.records.begin(),
+            shared.records.end(),
+            [move](const RootMsvShared::Record& record) noexcept {
+                return record.move == move;
+            }
+        );
+        if (duplicate == shared.records.end())
+            shared.records.push_back({move, RootMsvEntry{}, 0});
+    }
+}
+
+[[nodiscard]] RootMsvEntry root_msv_snapshot(
+    const SearchLimits& limits,
+    Move move
+) {
+    if (!root_msv_enabled(limits))
+        return RootMsvEntry{};
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    const RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    return record != nullptr ? record->entry : RootMsvEntry{};
+}
+
+void root_msv_set_last_priority(
+    const SearchLimits& limits,
+    Move move,
+    int priority
+) {
+    if (!root_msv_enabled(limits))
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record != nullptr)
+        record->lastPriority = priority;
+}
+
+[[nodiscard]] bool root_msv_has_signal(
+    const SearchLimits& limits
+) {
+    if (!root_msv_enabled(limits))
+        return false;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    for (const RootMsvShared::Record& record : shared.records) {
+        const RootMsvEntry& entry = record.entry;
+        if (entry.credit > 0)
+            return true;
+    }
+    return false;
+}
+
+void root_msv_adjust_active(
+    const SearchLimits& limits,
+    Move move,
+    int delta
+) {
+    if (!root_msv_enabled(limits) || move_is_none(move))
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record == nullptr)
+        return;
+
+    RootMsvEntry& entry = record->entry;
+    entry.activeWorkers = std::max(0, entry.activeWorkers + delta);
+}
+
+struct RootMsvActiveGuard {
+    const SearchLimits& limits;
+    Move move = 0;
+    bool active = false;
+
+    RootMsvActiveGuard(const SearchLimits& l, Move m)
+        : limits(l), move(m), active(root_msv_enabled(l) && !move_is_none(m)) {
+        if (active)
+            root_msv_adjust_active(limits, move, 1);
+    }
+
+    ~RootMsvActiveGuard() {
+        if (active)
+            root_msv_adjust_active(limits, move, -1);
+    }
+
+    RootMsvActiveGuard(const RootMsvActiveGuard&) = delete;
+    RootMsvActiveGuard& operator=(const RootMsvActiveGuard&) = delete;
+};
+
+[[nodiscard]] inline int root_msv_bad_bound_penalty(
+    memory::Bound bound
+) noexcept {
+    if (bound == memory::BOUND_UPPER)
+        return 96;
+    if (bound == memory::BOUND_LOWER)
+        return 48;
+    return 0;
+}
+
+[[nodiscard]] inline int root_msv_priority_from_entry(
+    int score_part,
+    int history_prior,
+    int depth,
+    const RootMsvEntry& entry
+) noexcept {
+    const int hit_count = entry.exactHits + entry.boundHits;
+    const int credit_part = entry.credit * 2;
+    const int stable_bonus = std::min(entry.stableCount, 16) * 12;
+    const int uncertainty_bonus = hit_count > 0
+        ? std::clamp(depth - entry.maxDepth, 0, 8) * 6
+        : 0;
+    const int active_worker_penalty = entry.activeWorkers * 96;
+    const int bad_bound_penalty = root_msv_bad_bound_penalty(entry.lastBound);
+
+    return score_part
+         + history_prior
+         + credit_part
+         + stable_bonus
+         + uncertainty_bonus
+         - active_worker_penalty
+         - bad_bound_penalty;
+}
+
+void root_msv_record_completed(
+    const SearchLimits& limits,
+    Move move,
+    int depth,
+    int seldepth,
+    int score,
+    memory::Bound bound,
+    bool stopped,
+    bool pv_valid,
+    int pv_length
+) {
+    if (!root_msv_enabled(limits) || move_is_none(move))
+        return;
+
+    if (stopped || !pv_valid || pv_length <= 2)
+        return;
+
+    RootMsvShared& shared = *limits.root_msv;
+    std::lock_guard<std::mutex> lock(shared.mutex);
+
+    for (RootMsvShared::Record& record : shared.records)
+        record.entry.credit = (record.entry.credit * 7) / 8;
+
+    RootMsvShared::Record* record = root_msv_find_locked(shared, move);
+    if (record == nullptr)
+        return;
+
+    RootMsvEntry& entry = record->entry;
+    const int previous_max_depth = entry.maxDepth;
+    const int previous_score = entry.lastScore;
+    const bool had_valid_pv = entry.pvValid;
+
+    entry.stopped = false;
+    entry.pvValid = pv_valid;
+    entry.pvLength = pv_length;
+    entry.lastScore = score;
+    entry.lastBound = bound;
+    entry.maxDepth = std::max(entry.maxDepth, depth);
+    entry.maxSelDepth = std::max(entry.maxSelDepth, seldepth);
+
+    if (bound == memory::BOUND_EXACT)
+        ++entry.exactHits;
+    else if (bound == memory::BOUND_LOWER || bound == memory::BOUND_UPPER)
+        ++entry.boundHits;
+
+    bool new_worker = false;
+    if (limits.thread_id >= 0 && limits.thread_id < 64) {
+        const std::uint64_t worker_bit = 1ULL << limits.thread_id;
+        new_worker = (entry.workerMask & worker_bit) == 0;
+        entry.workerMask |= worker_bit;
+        if (new_worker)
+            ++entry.workerHits;
+    }
+
+    const bool score_stable =
+        had_valid_pv && std::abs(score - previous_score) <= 32;
+    const bool depth_stable =
+        previous_max_depth > 0 && std::abs(depth - previous_max_depth) <= 2;
+    if (score_stable || depth_stable)
+        entry.stableCount = std::min(entry.stableCount + 1, 64);
+    else
+        entry.stableCount = std::max(1, (entry.stableCount * 3) / 4);
+
+    int bonus = 8; // completed search
+    if (bound == memory::BOUND_EXACT)
+        bonus += 48;
+    else if (bound == memory::BOUND_LOWER || bound == memory::BOUND_UPPER)
+        bonus += 12;
+    else
+        bonus = 0;
+
+    if (pv_length >= 4)
+        bonus += 16;
+
+    if (previous_max_depth > 0) {
+        const int depth_gap = std::abs(depth - previous_max_depth);
+        if (depth_gap <= 4)
+            bonus += 24;
+        else if (depth_gap <= 8)
+            bonus += 12;
+        else if (depth_gap <= 16)
+            bonus += 6;
+    }
+
+    if (new_worker)
+        bonus += 16;
+
+    if (bound != memory::BOUND_EXACT)
+        bonus /= 2;
+
+    if (bonus > 0)
+        entry.credit = std::clamp(entry.credit + bonus, 0, 4096);
 }
 
 /*
@@ -967,11 +1196,7 @@ struct Searcher {
         int alpha,
         int beta
     ) noexcept {
-        if (score <= alpha)
-            return memory::BOUND_UPPER;
-        if (score >= beta)
-            return memory::BOUND_LOWER;
-        return memory::BOUND_EXACT;
+        return score_bound_from_window(score, alpha, beta);
     }
 
     [[nodiscard]] static inline bool is_mate_window(int score) noexcept {
@@ -2184,6 +2409,159 @@ struct Searcher {
             scored.moves[i].score = score_move(pos, moves.moves[i], tt_move, ply, depth, &see_value);
             scored.moves[i].see_value = see_value;
         }
+    }
+
+    [[nodiscard]] inline bool root_msv_worker_ordering() const noexcept {
+        return root_msv_enabled(limits) &&
+               limits.thread_id != 0 &&
+               root_msv_has_signal(limits);
+    }
+
+    [[nodiscard]] inline int root_msv_history_prior(
+        const Position& pos,
+        Move move,
+        int depth,
+        int see_value
+    ) const noexcept {
+        if (move_is_capture(move))
+            return history_tables.capture_ordering_score_fast(
+                pos,
+                move,
+                depth,
+                see_value
+            ) / 8;
+
+        return history_tables.quiet_ordering_score_fast(
+            pos,
+            move,
+            Move(0),
+            ContinuationHistoryContext{},
+            ContinuationHistoryContext{},
+            ContinuationHistoryContext{}
+        ) / 8;
+    }
+
+    [[nodiscard]] inline int root_msv_priority(
+        const Position& pos,
+        const ScoredMove& scored,
+        int depth
+    ) const {
+        const RootMsvEntry entry = root_msv_snapshot(limits, scored.move);
+        const int score_part = scored.score / 1024;
+        const int history_prior = root_msv_history_prior(
+            pos,
+            scored.move,
+            depth,
+            scored.see_value
+        );
+        const int priority = root_msv_priority_from_entry(
+            score_part,
+            history_prior,
+            depth,
+            entry
+        );
+        root_msv_set_last_priority(limits, scored.move, priority);
+        return priority;
+    }
+
+    inline void apply_msv_root_order(
+        const Position& pos,
+        ScoredMoveList& scored,
+        int depth
+    ) const {
+        if (!root_msv_worker_ordering())
+            return;
+
+        for (int i = 0; i < scored.size; ++i)
+            scored.moves[i].score = root_msv_priority(pos, scored.moves[i], depth);
+    }
+
+    void emit_msv_info(
+        std::ostream& out,
+        const Position& root,
+        int depth
+    ) const {
+        if (!root_msv_enabled(limits) ||
+            !limits.msv_info ||
+            limits.thread_id != 0) {
+            return;
+        }
+
+        MoveList list{};
+        generate_legal(root, mem, list);
+
+        if (limits.root_move_count > 0) {
+            MoveList filtered{};
+            for (int i = 0; i < list.size; ++i) {
+                const Move move = list.moves[i];
+                bool allowed = false;
+                for (int j = 0; j < limits.root_move_count; ++j) {
+                    if (limits.root_moves[j] == move) {
+                        allowed = true;
+                        break;
+                    }
+                }
+                if (allowed)
+                    filtered.moves[filtered.size++] = move;
+            }
+            list = filtered;
+        }
+
+        const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
+        const Move tt_move = tt_move_from_probe(probe);
+        ScoredMoveList scored{};
+        score_moves(root, list, scored, tt_move, 0, depth);
+
+        struct DebugEntry {
+            Move move = 0;
+            RootMsvEntry entry{};
+            int priority = 0;
+        };
+
+        std::vector<DebugEntry> entries;
+        entries.reserve(static_cast<std::size_t>(scored.size));
+        for (int i = 0; i < scored.size; ++i) {
+            const int priority = root_msv_priority(root, scored.moves[i], depth);
+            const RootMsvEntry entry = root_msv_snapshot(limits, scored.moves[i].move);
+            if (entry.credit == 0 &&
+                entry.exactHits == 0 &&
+                entry.boundHits == 0 &&
+                entry.activeWorkers == 0) {
+                continue;
+            }
+
+            entries.push_back({scored.moves[i].move, entry, priority});
+        }
+
+        if (entries.empty())
+            return;
+
+        std::stable_sort(
+            entries.begin(),
+            entries.end(),
+            [](const DebugEntry& lhs, const DebugEntry& rhs) noexcept {
+                if (lhs.priority != rhs.priority)
+                    return lhs.priority > rhs.priority;
+                if (lhs.entry.credit != rhs.entry.credit)
+                    return lhs.entry.credit > rhs.entry.credit;
+                return lhs.move < rhs.move;
+            }
+        );
+
+        out << "info string msv d=" << depth;
+        const int count = std::min<int>(6, static_cast<int>(entries.size()));
+        for (int i = 0; i < count; ++i) {
+            const DebugEntry& e = entries[static_cast<std::size_t>(i)];
+            out << ' ' << move_to_uci(e.move)
+                << "[c=" << e.entry.credit
+                << ",h=" << (e.entry.exactHits + e.entry.boundHits)
+                << ",w=" << e.entry.workerHits
+                << ",md=" << e.entry.maxDepth
+                << ",a=" << e.entry.activeWorkers
+                << ",p=" << e.priority
+                << ']';
+        }
+        out << '\n';
     }
 
     [[nodiscard]] inline Move pick_next(ScoredMoveList& scored, int index) const noexcept {
@@ -3605,6 +3983,7 @@ struct Searcher {
 
         ScoredMoveList scored;
         score_moves(root, list, scored, root_hint, 0, depth);
+        apply_msv_root_order(root, scored, depth);
         int best_score = -VALUE_INF;
         result.best_move = 0;
 
@@ -3616,6 +3995,7 @@ struct Searcher {
 #if MAGNUS_SEARCHSTATS_OBS
             ++stats.root_moves_searched;
 #endif
+            RootMsvActiveGuard msv_active(limits, move);
             const RootMoveResult move_result =
                 search_root_move(root, move, depth, alpha, beta, i == 0);
             const int score = move_result.score;
@@ -4017,6 +4397,7 @@ struct IterativeWorkerResult {
     SearchResult best{};
     Move pv[MAX_PLY]{};
     int pv_length = 0;
+    memory::Bound score_bound = memory::BOUND_EXACT;
 };
 
 [[nodiscard]] bool pv_contains_key(
@@ -4171,9 +4552,11 @@ void extend_syzygy_pv(
 void capture_completed_result(
     IterativeWorkerResult& result,
     const SearchResult& best,
-    const Searcher& searcher
+    const Searcher& searcher,
+    memory::Bound score_bound
 ) noexcept {
     result.best = best;
+    result.score_bound = score_bound;
     result.pv_length = searcher.pv_length[0];
     result.best.pv_length = result.pv_length;
     for (int i = 0; i < result.pv_length; ++i) {
@@ -4193,7 +4576,8 @@ void emit_iteration_info(
     Searcher::clock::time_point search_start,
     u64 nodes,
     u64 tb_hits,
-    int depth
+    int depth,
+    memory::Bound score_bound
 ) {
     const double seconds =
         std::chrono::duration<double>(Searcher::clock::now() - search_start).count();
@@ -4211,7 +4595,8 @@ void emit_iteration_info(
         local_root,
         searcher.use_mnue()
             ? ScoreModel::Mnue
-            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce)
+            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
+        score_bound
     );
     stream << " nodes " << nodes
            << " nps " << nps
@@ -4220,8 +4605,17 @@ void emit_iteration_info(
            << " time " << time_ms
            << " pv";
 
-    for (int i = 0; i < pv_length; ++i)
-        stream << ' ' << move_to_uci(pv[i]);
+    Move fallback_pv[1]{};
+    const Move* emitted_pv = pv;
+    int emitted_pv_length = pv_length;
+    if (emitted_pv_length <= 0 && !move_is_none(current.best_move)) {
+        fallback_pv[0] = current.best_move;
+        emitted_pv = fallback_pv;
+        emitted_pv_length = 1;
+    }
+
+    for (int i = 0; i < emitted_pv_length; ++i)
+        stream << ' ' << move_to_uci(emitted_pv[i]);
 
     stream << '\n';
 }
@@ -4250,7 +4644,8 @@ void emit_iteration_info(
 #if MAGNUS_SEARCHSTATS_OBS
     u64 last_reported_nodes = 0;
 #endif
-    const int max_depth = std::max(1, searcher.limits.depth);
+    const int max_depth =
+        std::clamp(searcher.limits.depth, 1, MAX_SEARCH_DEPTH);
     IterationTimeState time_state{};
     if (searcher.limits.root_move_count > 0) {
         time_state.root_legal_count = searcher.limits.root_move_count;
@@ -4277,6 +4672,9 @@ void emit_iteration_info(
         int beta = VALUE_INF;
         int delta = ASPIRATION_DELTA;
         int depth_max_seldepth = 0;
+        memory::Bound current_score_bound = memory::BOUND_EXACT;
+        int current_bound_alpha = alpha;
+        int current_bound_beta = beta;
 
         if (use_root_aspiration(searcher.limits, depth)) {
             alpha = std::max(-VALUE_INF, best.score - delta);
@@ -4289,18 +4687,33 @@ void emit_iteration_info(
 
             reset_searcher_iteration(searcher, search_start, total_nodes + depth_nodes);
 
-            current = searcher.search_root(keyed_root, depth, hint_move, alpha, beta);
+            const int attempt_alpha = alpha;
+            const int attempt_beta = beta;
+            current_bound_alpha = attempt_alpha;
+            current_bound_beta = attempt_beta;
+            current = searcher.search_root(
+                keyed_root,
+                depth,
+                hint_move,
+                attempt_alpha,
+                attempt_beta
+            );
             depth_max_seldepth = std::max(depth_max_seldepth, searcher.seldepth);
             current.seldepth = depth_max_seldepth;
             searcher.publish_nodes();
             searcher.publish_tb_hits();
             depth_nodes += current.nodes;
             depth_tb_hits += current.tb_hits;
+            current_score_bound = score_bound_from_window(
+                current.score,
+                attempt_alpha,
+                attempt_beta
+            );
 
             if (searcher.stopped || depth == 1)
                 break;
 
-            if (current.score <= alpha) {
+            if (current.score <= attempt_alpha) {
 #if MAGNUS_SEARCHSTATS_OBS
                 ++aspiration_fail_low;
 #endif
@@ -4310,7 +4723,7 @@ void emit_iteration_info(
                 continue;
             }
 
-            if (current.score >= beta) {
+            if (current.score >= attempt_beta) {
 #if MAGNUS_SEARCHSTATS_OBS
                 ++aspiration_fail_high;
 #endif
@@ -4347,6 +4760,11 @@ void emit_iteration_info(
                 searcher.limits.syzygy_50_move_rule
             );
         }
+        current_score_bound = score_bound_from_window(
+            current.score,
+            current_bound_alpha,
+            current_bound_beta
+        );
 
         total_nodes += depth_nodes;
         total_tb_hits += depth_tb_hits;
@@ -4363,7 +4781,25 @@ void emit_iteration_info(
             best.nodes = total_nodes;
             best.tb_hits = total_tb_hits;
             hint_move = current.best_move;
-            capture_completed_result(result, best, searcher);
+            capture_completed_result(result, best, searcher, current_score_bound);
+        }
+
+        if (root_msv_enabled(searcher.limits) && !move_is_none(current.best_move)) {
+            const bool msv_stopped = searcher.stopped || searcher.hit_hard_limit();
+            const bool pv_valid =
+                searcher.pv_length[0] > 2 &&
+                searcher.pv_table[0][0] == current.best_move;
+            root_msv_record_completed(
+                searcher.limits,
+                current.best_move,
+                depth,
+                current.seldepth,
+                current.score,
+                current_score_bound,
+                msv_stopped,
+                pv_valid,
+                searcher.pv_length[0]
+            );
         }
 
         const bool should_stop_for_time =
@@ -4397,8 +4833,10 @@ void emit_iteration_info(
                 search_start,
                 reported_nodes,
                 reported_tb_hits,
-                depth
+                depth,
+                current_score_bound
             );
+            searcher.emit_msv_info(*local_out, keyed_root, depth);
 #if MAGNUS_SEARCHSTATS_OBS
             emit_searchstats_line(
                 *local_out,
@@ -4415,27 +4853,45 @@ void emit_iteration_info(
 
         if (stopped_mid_depth) {
             if (local_out != nullptr &&
-                searcher.limits.report_info &&
-                depth > best.depth + 1) {
+                searcher.limits.report_info) {
                 const u64 reported_nodes = searcher.limits.shared_nodes != nullptr
                     ? searcher.limits.shared_nodes->load(std::memory_order_relaxed)
                     : total_nodes;
                 const u64 reported_tb_hits = searcher.limits.shared_tb_hits != nullptr
                     ? searcher.limits.shared_tb_hits->load(std::memory_order_relaxed)
                     : total_tb_hits;
-                emit_iteration_info(
-                    *local_out,
-                    searcher.mem,
-                    keyed_root,
-                    searcher,
-                    best,
-                    result.pv,
-                    result.pv_length,
-                    search_start,
-                    reported_nodes,
-                    reported_tb_hits,
-                    best.depth
-                );
+                if (!move_is_none(current.best_move) && current.nodes > 0) {
+                    emit_iteration_info(
+                        *local_out,
+                        searcher.mem,
+                        keyed_root,
+                        searcher,
+                        current,
+                        searcher.pv_table[0],
+                        searcher.pv_length[0],
+                        search_start,
+                        reported_nodes,
+                        reported_tb_hits,
+                        depth,
+                        // Partial root search is a best-so-far estimate, not exact.
+                        memory::BOUND_LOWER
+                    );
+                } else if (depth > best.depth + 1) {
+                    emit_iteration_info(
+                        *local_out,
+                        searcher.mem,
+                        keyed_root,
+                        searcher,
+                        best,
+                        result.pv,
+                        result.pv_length,
+                        search_start,
+                        reported_nodes,
+                        reported_tb_hits,
+                        best.depth,
+                        result.score_bound
+                    );
+                }
 #if MAGNUS_SEARCHSTATS_OBS
                 const u64 reported_depth_nodes =
                     reported_nodes >= last_reported_nodes
@@ -4562,7 +5018,8 @@ void emit_iteration_info(
             search_start,
             result.best.nodes,
             result.best.tb_hits,
-            result.best.depth
+            result.best.depth,
+            result.score_bound
         );
     }
 
@@ -4682,7 +5139,13 @@ void emit_iteration_info(
 
         stream << "info depth " << result.best.depth
                << " seldepth " << result.best.seldepth << ' ';
-        append_uci_score(stream, result.best.score, local_root, score_model);
+        append_uci_score(
+            stream,
+            result.best.score,
+            local_root,
+            score_model,
+            result.score_bound
+        );
         stream << " nodes " << nodes
                << " nps " << nps
                << " tbhits " << tb_hits
@@ -4707,6 +5170,13 @@ void emit_iteration_info(
     main_limits.stop = &shared_stop;
     main_limits.shared_nodes = &shared_nodes;
     main_limits.shared_tb_hits = &shared_tb_hits;
+    RootMsvShared root_msv_state{};
+    if (main_limits.use_msv_smp && main_limits.thread_count > 1) {
+        root_msv_seed_moves(root, mem, main_limits, root_msv_state);
+        main_limits.root_msv = &root_msv_state;
+    } else {
+        main_limits.root_msv = nullptr;
+    }
 
     Searcher main_searcher(mem, main_limits);
     const int worker_count = main_limits.thread_count;
@@ -4794,6 +5264,9 @@ void emit_iteration_info(
         recovery_limits.external_stop = limits.stop;
         recovery_limits.shared_nodes = &shared_nodes;
         recovery_limits.shared_tb_hits = &shared_tb_hits;
+        recovery_limits.use_msv_smp = false;
+        recovery_limits.msv_info = false;
+        recovery_limits.root_msv = nullptr;
 
         Searcher recovery_searcher(mem, recovery_limits);
         recovery_searcher.p2_accumulator_stack.reset();
@@ -4820,6 +5293,7 @@ void emit_iteration_info(
                 best.best.pv[i] = best.pv[i];
             }
             best.best.pv_length = best.pv_length;
+            best.score_bound = memory::BOUND_EXACT;
         }
     }
 
