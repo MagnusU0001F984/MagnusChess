@@ -28,6 +28,7 @@ SOFTWARE.
 #include "Memory.h"
 #include "board/MoveGen.h"
 #include "mnue/Mnue.h"
+#include "mnue/MnueV2Network.h"
 #include "Nnue.h"
 #include "Perft.h"
 #include "board/Position.h"
@@ -58,25 +59,63 @@ namespace {
 constexpr std::string_view BENCH_SEPARATOR = "===========================";
 constexpr int MAX_SEARCH_THREADS = 512;
 
-constexpr std::array<std::string_view, 13> SEARCH_BENCH_FENS{{
-    "1rbqk2r/p2pppbp/6p1/3QP3/8/4B3/PPP2PPP/2KR1B1R b k - 2 11",
-    "r1bqk2r/p2pppbp/2p3p1/3NP3/8/4B3/PPP2PPP/R2QKB1R b KQkq - 0 9",
-    "R4b2/5pkp/1Q2b1p1/1B6/8/8/P1P2PPP/1K2R3 b - - 2 21",
-    "r1bqkb1r/pppp1ppp/2n5/1B6/3pn3/5N2/PPP2PPP/RNBQR1K1 b kq - 1 6",
-    "r1bqkb1r/pppp2pp/8/1B3p2/3Qn3/8/PPP2PPP/RNB1R1K1 b kq - 0 8",
-    "r3k2r/pp4pp/2p1b3/2b5/8/7P/P2q1PP1/1R4K1 w kq - 1 19",
-    "r3kb1r/pp4pp/2p1b3/8/8/2N1B3/Pq3PPP/2R3K1 w kq - 0 16",
-    "2rr1k2/4ppb1/2p3p1/p1P1PbNp/3N1BnP/P7/1P3PP1/2RR2K1 w - - 4 23",
-    "r3kb1r/pp4pp/2p1b3/8/8/2q5/P2B1PPP/1R4K1 b kq - 1 17",
-    "4k3/4ppb1/6p1/N1r1PbNp/5BnP/P7/1P3PP1/3R2K1 w - - 0 26",
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-    "r4rk1/ppp1qppp/1b3n2/8/3nP1b1/1BNN4/PPPP1PPP/R1B1QRK1 b - - 6 11",
-    "r4rk1/ppp1qppp/1b3n2/8/4P3/1BNN1b1P/PPPP1P2/R1B1QRK1 b - - 0 13",
+constexpr std::array<std::string_view, 50> SEARCH_BENCH_FENS{{
+    "rnb1k2r/pp2bp1p/2p1pp2/q7/8/1P6/PBPPQPPP/2KR1BNR w kq - 4 9",
+    "1r1qk1nr/pppn1ppp/3p4/3Pp1b1/2P5/2N2Q1P/PP2PPP1/R1B1KB1R w KQk - 3 9",
+    "r3kbnr/pp3ppp/2n5/2P1pq2/N1Pp2b1/5N2/PP1BPPPP/R2QKB1R w KQkq - 0 9",
+    "rnb1k2r/pppp2pp/8/8/2P2Bn1/2q4N/P3PPPP/R2QKB1R w KQkq - 0 9",
+    "r2qk2r/ppp1bppp/2n1bn2/8/2NPp3/2P5/PP2BPPP/RNBQ1RK1 w kq - 1 9",
+    "r1b1kb1r/1pqnppp1/p2p1n1p/8/3NP1PP/P1N5/1PP2P2/R1BQKB1R w KQkq - 1 9",
+    "rnb1kb1r/pp3pp1/1qpnp2p/3p4/3PP2B/P1N2P1N/1PP3PP/R2QKB1R w KQkq - 0 9",
+    "r1bqr1k1/pppp1ppp/2n5/3np1N1/4P3/2P5/PPP2PPP/R1BQ1RK1 w - - 0 9",
+    "r1bqkb1r/3n1ppp/p1p1pn2/1p6/8/5NP1/PPQPPPBP/RNB2RK1 w kq - 0 9",
+    "r2qk2r/ppp1bppp/2np2n1/3N4/2BPPpb1/5N2/PPP3PP/R1BQ1RK1 w kq - 4 9",
+    "r1bqkbnr/3n1ppp/p3p3/2p5/Pp1P4/4PN2/1P2BPPP/RNBQ1RK1 w kq - 0 9",
+    "r1bqk2r/ppp1bppp/2n1p3/3pP3/2PP1B2/2PQ4/P4PPP/R3KBNR w KQkq d6 0 9",
+    "r1bqk1nr/1ppn1pb1/p2p2pp/4p3/P2PP3/2NB1N2/1PP2PPP/R1BQ1RK1 w kq - 0 9",
+    "r1bq1rk1/pp1pppbp/5np1/4n3/2PN4/1PN3P1/P3PPBP/R1BQK2R w KQ - 1 9",
+    "rn1qkb1r/1p2npp1/4p2p/p2pPb2/3P4/P1N5/1P2NPPP/R1BQKB1R w KQkq - 2 9",
+    "r1bqk2r/1p1nbpp1/p2p1n1p/2pPp3/2P5/P1N1PN1P/1P3PP1/R1BQKB1R w KQkq - 1 9",
+    "r1bqk2r/2p1bpp1/p1np1n2/1p2p2p/3PP3/2N1BP2/PPPQN1PP/2KR1B1R w kq - 0 9",
+    "r1bqk2r/p2nppbp/2pp2p1/1p2Pn2/3P1P2/2N1BN2/PPPQ2PP/R3KB1R w KQkq - 3 9",
+    "r1b1k2r/pp1n1ppp/2p1pn2/q2p4/1bPP4/1PN2NP1/P2BPPBP/R2QK2R w KQkq - 3 9",
+    "r1bq1bnr/p1p4p/1pk2p2/3pp1pQ/3P4/4P1B1/PPP2PPP/RN2K1NR w KQ - 0 9",
+    "rn1qkb1r/1bp2ppp/p3pn2/8/Pp1PP3/1B3P2/1P2N1PP/RNBQK2R w KQkq - 0 9",
+    "rnbq1rk1/1p2ppbp/2p3p1/p2n4/3P4/2NB1N1P/PPP2PP1/R1BQ1RK1 w - - 0 9",
+    "rn1qkb1r/1p3p2/p1p1pn1p/2Pp1bp1/3P1B2/2N1PN2/PP2BPPP/R2QK2R w KQkq - 0 9",
+    "r1bqk2r/pp1n1pp1/3p1n1p/2pPp3/1bP1P3/2N1BP2/PP4PP/R2QKBNR w KQkq - 2 9",
+    "r1bqkb1r/1p2np1p/p1npp1p1/8/3NPP2/2NBB3/PPP3PP/R2QK2R w KQkq - 0 9",
+    "rnbq1rk1/p1p2pp1/1p3p1p/8/1bBP4/2N1P3/PP2NPPP/R2QK2R w KQ - 0 9",
+    "r1bqkb1r/pp4pp/2p1p3/3pnp1n/2PP4/2NBPN2/PP3PPP/R2QK2R w KQkq - 0 9",
+    "rn1q1rk1/p1ppbppp/b3pn2/1p6/2PP4/1P3NP1/P2BPPBP/RN1Q1RK1 w - - 0 9",
+    "rnbq1rk1/p3npbp/1pp1p1p1/3p4/2PP1B2/2NBPN2/PP3PPP/2RQK2R w K - 0 9",
+    "rnbqk2r/1pp2pbp/p2p2p1/3pP3/3P1P2/3B1N2/PPP3PP/R1BQK2R w KQkq - 0 9",
+    "rn1q1rk1/pbp1ppbp/1p3np1/3p4/3PPP2/2N1BB1P/PPP3P1/R2QK1NR w KQ - 0 9",
+    "rnbqk2r/pp2p1bp/2pn1pp1/3pN3/3P4/2P3P1/PP1NPPBP/R1BQ1RK1 w kq - 0 9",
+    "r1bq1rk1/p1pp1ppp/1pn5/4P3/2P1n3/P3PN2/1P1B1PPP/R2QKB1R w KQ - 0 9",
+    "r1bqkbnr/ppp2p2/2npp3/8/2PP1P1p/3NP1pP/PP4P1/RNBQKB1R w KQkq - 0 9",
+    "r2qk2r/ppp3pp/2n1b3/3n4/1b6/2N1PN2/PP3PPP/R1BQKB1R w KQkq - 0 9",
+    "r1bqk2r/pppnn1b1/3pp1pp/5p1P/4PP2/2PP1N2/PP2B1P1/RNBQK2R w KQkq - 1 9",
+    "r1b1kb1r/1p1p1ppp/p1q1pn2/8/4P3/1P1B4/P1P2PPP/RNBQ1RK1 w kq - 0 9",
+    "r1bqk1nr/pp1p1ppp/1b6/8/1n2P3/1N1B4/PP3PPP/RNBQK2R w KQkq - 5 9",
+    "r2q1rk1/ppp1ppb1/2np1np1/6Bp/3PP1bP/2PQ1N2/PP1N1PP1/R3KB1R w KQ - 5 9",
+    "rn1qkb1r/1bpp2pp/p3p3/3n1p2/Pp1P4/4PNB1/1PPNBPPP/R2QK2R w KQkq - 0 9",
+    "r1b1kbnr/1pq2pp1/p1np3p/4p3/2B1P3/5N2/PPP2PPP/RNBQR1K1 w kq - 2 9",
+    "r1b1kb1r/pp3ppp/1q2pn2/2pP4/2pn4/2N2NP1/PP2PPBP/R1BQ1RK1 w kq - 0 9",
+    "r3kb1r/ppp1p2p/2np1np1/5q2/3P4/5N2/PPP2PPP/RNBQ1RK1 w kq - 0 9",
+    "r1bqnrk1/pp1nbppp/3pp3/2p3B1/3PP3/2PB1N1P/PP3PP1/RN1Q1RK1 w - - 1 9",
+    "r1bqr1k1/pp1nbppp/4pn2/2pp4/3P1B1P/2PBPN2/PP1N1PP1/R2QK2R w KQ - 1 9",
+    "r1b1kb1r/1pq2ppp/p1np1n2/2p1p3/P3P3/2N2NP1/1PPP1PBP/R1BQR1K1 w kq - 0 9",
+    "rnbq1rk1/1p2ppb1/2pp1npp/p7/P2PP3/2N1BN2/1PP1BPPP/R2Q1RK1 w - - 0 9",
+    "r1bqk2r/pp1nppbp/2np4/6B1/2P5/2NQPN2/PP3PPP/R3KB1R w KQkq - 1 9",
+    "rnbq1rk1/1p2ppb1/p1p2n1p/3p2p1/2PP4/2N1PNBP/PP3PP1/R2QKB1R w KQ - 1 9",
+    "rn2k2r/ppq2p1p/2ppbp2/2b1p3/2B1P2N/3P4/PPP2PPP/RN1Q1RK1 w kq - 2 9",
 }};
 
 struct SearchBenchResult {
     search::SearchResult search{};
     u64 time_ms = 0;
+    double seconds = 0.0;
     u64 nps = 0;
     std::string ponder{};
 };
@@ -275,6 +314,50 @@ template<typename EvalFn>
 
     result.micros = static_cast<u64>(
         std::chrono::duration_cast<std::chrono::microseconds>(end - start).count()
+    );
+    return result;
+}
+
+[[nodiscard]] EvalBenchTiming benchmark_v2_stack_batch(
+    const std::array<Position, SEARCH_BENCH_FENS.size()>& positions,
+    const memory::Memory& mem,
+    int iterations
+) {
+    using clock = std::chrono::steady_clock;
+
+    std::array<
+        mnue::v2::AccumulatorStack,
+        SEARCH_BENCH_FENS.size()
+    > stacks{};
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        stacks[i].reset();
+        (void)mnue::v2::evaluate_incremental(
+            positions[i],
+            mem,
+            stacks[i]
+        );
+    }
+
+    EvalBenchTiming result;
+    result.evals = static_cast<std::size_t>(iterations) * positions.size();
+    const auto start = clock::now();
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            result.checksum += static_cast<i64>(
+                mnue::v2::evaluate_incremental(
+                    positions[i],
+                    mem,
+                    stacks[i]
+                )
+            );
+        }
+    }
+    const auto end = clock::now();
+
+    result.micros = static_cast<u64>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            end - start
+        ).count()
     );
     return result;
 }
@@ -541,7 +624,8 @@ void render_eval_bench_timing(
     } else {
         result.search = search::iterative_deepening(pos, mem, limits, nullptr);
     }
-    result.ponder = ponder_move_from_search_result(pos, mem, result.search);
+    if (limits.recover_ponder_pv)
+        result.ponder = ponder_move_from_search_result(pos, mem, result.search);
     const auto end = clock::now();
 
     const u64 time_ms = static_cast<u64>(
@@ -550,6 +634,7 @@ void render_eval_bench_timing(
     const double seconds = std::chrono::duration<double>(end - start).count();
 
     result.time_ms = time_ms;
+    result.seconds = seconds;
     result.nps = seconds > 0.0
         ? static_cast<u64>(static_cast<double>(result.search.nodes) / seconds)
         : 0ULL;
@@ -808,6 +893,78 @@ bool run_search_bench(
     return true;
 }
 
+bool run_compact_search_bench(
+    memory::Memory& mem,
+    int depth,
+    std::size_t hash_mb,
+    std::size_t threads,
+    bool use_nnue,
+    std::ostream& out
+) {
+    const int search_threads = std::clamp<int>(
+        static_cast<int>(threads),
+        1,
+        MAX_SEARCH_THREADS
+    );
+
+    u64 total_nodes = 0;
+    double total_seconds = 0.0;
+
+    out << "--------------------------------------------------\n";
+    out << "          Nodes       Elapsed             NPS\n";
+    out << "--------------------------------------------------\n";
+
+    for (std::size_t i = 0; i < SEARCH_BENCH_FENS.size(); ++i) {
+        Position bench_pos{};
+        const std::string_view fen = SEARCH_BENCH_FENS[i];
+        if (!parse_fen(bench_pos, mem, fen)) {
+            out << "info string failed to parse bench FEN: " << fen << '\n';
+            return false;
+        }
+
+        search::SearchLimits limits{};
+        limits.depth = depth;
+        limits.use_nnue = use_nnue;
+        limits.thread_count = search_threads;
+        limits.thread_id = 0;
+        limits.report_info = false;
+        limits.recover_ponder_pv = false;
+
+        const SearchBenchResult res = benchmark_search_position(
+            bench_pos,
+            mem,
+            limits,
+            nullptr
+        );
+
+        total_nodes += res.search.nodes;
+        total_seconds += res.seconds;
+
+        out << std::setw(3) << i
+            << std::setw(12) << res.search.nodes
+            << std::setw(13) << std::fixed << std::setprecision(3)
+            << res.seconds << "s"
+            << std::setw(16) << res.nps << " N/s\n";
+    }
+
+    const u64 total_nps = total_seconds > 0.0
+        ? static_cast<u64>(static_cast<double>(total_nodes) / total_seconds)
+        : 0ULL;
+
+    out << "--------------------------------------------------\n";
+    out << std::setw(15) << total_nodes
+        << std::setw(13) << std::fixed << std::setprecision(3)
+        << total_seconds << "s"
+        << std::setw(16) << total_nps << " N/s\n";
+    out << "--------------------------------------------------\n";
+    out << "depth " << depth
+        << " hash " << hash_mb
+        << " threads " << search_threads
+        << " evaluator " << (use_nnue ? "nnue" : "hce")
+        << '\n';
+    return true;
+}
+
 bool run_timed_search_bench(
     memory::Memory& mem,
     int movetime_ms,
@@ -880,8 +1037,9 @@ bool run_eval_bench(
 
     const std::string mnue_file = default_mnue_p2_file();
     const bool mnue_ok = ensure_mnue_p2_loaded(mnue_file, &out);
+    const bool mnue_v2_ok = mnue::v2::loaded();
 
-    if (!nnue_ok && !mnue_ok) {
+    if (!nnue_ok && !mnue_ok && !mnue_v2_ok) {
         out << "info string evalbench has no loaded evaluator\n";
         return false;
     }
@@ -917,6 +1075,26 @@ bool run_eval_bench(
             return false;
     }
 
+    if (mnue_v2_ok) {
+        int mismatches = 0;
+        for (const Position& pos : positions) {
+            mnue::v2::AccumulatorStack stack{};
+            const int incremental =
+                mnue::v2::evaluate_incremental(pos, mem, stack);
+            const int reference =
+                mnue::v2::evaluate_reference(pos, mem);
+            if (incremental != reference)
+                ++mismatches;
+        }
+        out << "  mnue_v2 backend " << mnue::v2::backend_name()
+            << " network_bytes " << mnue::v2::network_bytes()
+            << " stack_bytes " << mnue::v2::accumulator_stack_bytes()
+            << " reference_mismatches " << mismatches
+            << '\n';
+        if (mismatches != 0)
+            return false;
+    }
+
     if (nnue_ok) {
         for (const Position& pos : positions)
             (void)nnue::eval(pos);
@@ -940,6 +1118,29 @@ bool run_eval_bench(
             [](const Position& pos) noexcept { return mnue::debug_eval_p2_reference(pos); }
         );
         render_eval_bench_timing(out, "mnue_p2_reference", mnue_reference_timing);
+    }
+
+    if (mnue_v2_ok) {
+        const EvalBenchTiming v2_fast_timing =
+            benchmark_v2_stack_batch(positions, mem, iterations);
+        render_eval_bench_timing(
+            out,
+            "mnue_v2_lazy_stack",
+            v2_fast_timing
+        );
+        const EvalBenchTiming v2_reference_timing =
+            benchmark_eval_batch(
+                positions,
+                iterations,
+                [&](const Position& pos) noexcept {
+                    return mnue::v2::evaluate_reference(pos, mem);
+                }
+            );
+        render_eval_bench_timing(
+            out,
+            "mnue_v2_reference",
+            v2_reference_timing
+        );
     }
 
     return true;
@@ -969,7 +1170,10 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
     }
     else if (argc > 1 && std::string_view(argv[1]) == "bench") {
         cfg.search = true;
-        cfg.timed_search = true;
+        cfg.timed_search = false;
+        cfg.search_depth = 12;
+        cfg.hash_mb = 16;
+        cfg.threads = 1;
         argi = 2;
     }
     else if (argc > 1 && std::string_view(argv[1]) == "evalbench") {
@@ -1079,6 +1283,8 @@ BenchConfig parse_config(int argc, char** argv) noexcept {
 
 int run_bench(int argc, char** argv) { 
     const BenchConfig cfg = parse_config(argc, argv);
+    const bool compact_bench =
+        argc > 1 && std::string_view(argv[1]) == "bench";
     bool use_nnue = false;
 
     if (!cfg.valid) {
@@ -1087,6 +1293,7 @@ int run_bench(int argc, char** argv) {
                "[auto|pext|magic|table|classical]\n"
             << "       MagnusChess divide <depth> <hash_mb> <threads> "
                "[live] [auto|pext|magic|table|classical]\n"
+            << "       MagnusChess bench [depth=12] [hash_mb=16] [threads=1]\n"
             << "       MagnusChess -tt -hash <mb> [-entries <count>]\n";
         return 1;
     }
@@ -1121,7 +1328,7 @@ int run_bench(int argc, char** argv) {
     }
 
     if (cfg.search) {
-        if (cfg.timed_search) {
+        if (cfg.timed_search || compact_bench) {
             const std::string mnue_file = default_mnue_p2_file();
             use_nnue = ensure_mnue_p2_loaded(mnue_file, &std::cout);
 
@@ -1134,23 +1341,32 @@ int run_bench(int argc, char** argv) {
                 std::cout << "info string nnue unavailable, bench will use hce\n";
         }
 
-        const bool ok = cfg.timed_search
-            ? run_timed_search_bench(
-                mem,
-                cfg.search_movetime_ms,
-                cfg.threads,
-                use_nnue,
-                true,
-                std::cout
-            )
-            : run_search_bench(
+        const bool ok = compact_bench
+            ? run_compact_search_bench(
                 mem,
                 cfg.search_depth,
+                cfg.hash_mb,
                 cfg.threads,
-                false,
-                true,
+                use_nnue,
                 std::cout
-            );
+            )
+            : cfg.timed_search
+                ? run_timed_search_bench(
+                    mem,
+                    cfg.search_movetime_ms,
+                    cfg.threads,
+                    use_nnue,
+                    true,
+                    std::cout
+                )
+                : run_search_bench(
+                    mem,
+                    cfg.search_depth,
+                    cfg.threads,
+                    false,
+                    true,
+                    std::cout
+                );
         memory_free(mem);
         return ok ? 0 : 1;
     }

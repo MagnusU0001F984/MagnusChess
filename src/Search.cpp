@@ -47,6 +47,9 @@ SOFTWARE.
 #include "Nmp.h"
 #include "Nnue.h"
 #include "mnue/Mnue.h"
+#include "mnue/MnueX1Network.h"
+#include "mnue/MnueV2Network.h"
+#include "mnue/MnueV2Telemetry.h"
 #include "See.h"
 #include "syzygy/Syzygy.h"
 
@@ -639,6 +642,8 @@ struct Searcher {
     int root_side_to_move = WHITE;
     HistoryTables history_tables{};
     mutable mnue::P2AccumulatorStack p2_accumulator_stack{};
+    mutable mnue::x1::AccumulatorStack x1_accumulator_stack{};
+    mutable mnue::v2::AccumulatorStack v2_accumulator_stack{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
@@ -1932,7 +1937,20 @@ struct Searcher {
     }
 
     [[nodiscard]] inline bool use_mnue() const noexcept {
-        return limits.use_nnue && mnue::p2_loaded();
+        return limits.use_nnue
+            && (
+                mnue::x1::loaded()
+                || mnue::v2::loaded()
+                || mnue::p2_loaded()
+            );
+    }
+
+    [[nodiscard]] inline bool use_mnue_x1() const noexcept {
+        return limits.use_nnue && mnue::x1::loaded();
+    }
+
+    [[nodiscard]] inline bool use_mnue_v2() const noexcept {
+        return limits.use_nnue && mnue::v2::loaded();
     }
 
     inline void make_search_move(
@@ -1940,9 +1958,15 @@ struct Searcher {
         Move move,
         StateInfo& st
     ) noexcept {
-        if (use_mnue())
+        if (use_mnue_x1())
+            x1_accumulator_stack.push();
+        else if (use_mnue_v2())
+            v2_accumulator_stack.push(pos, mem, move);
+        else if (use_mnue())
             p2_accumulator_stack.push(pos, move);
         make_move(pos, move, mem.tables, st);
+        if (use_mnue_v2())
+            v2_accumulator_stack.after_make(pos, mem);
     }
 
     inline void unmake_search_move(
@@ -1951,11 +1975,29 @@ struct Searcher {
         const StateInfo& st
     ) noexcept {
         unmake_move(pos, move, mem.tables, st);
-        if (use_mnue())
+        if (use_mnue_x1())
+            x1_accumulator_stack.pop();
+        else if (use_mnue_v2())
+            v2_accumulator_stack.pop(pos, mem);
+        else if (use_mnue())
             p2_accumulator_stack.pop();
     }
 
     [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
+        if (use_mnue_x1()) {
+            return mnue::x1::evaluate_incremental(
+                pos,
+                mem,
+                x1_accumulator_stack
+            );
+        }
+        if (use_mnue_v2()) {
+            return mnue::v2::evaluate_incremental(
+                pos,
+                mem,
+                v2_accumulator_stack
+            );
+        }
         if (use_mnue())
             return mnue::eval_p2(pos, p2_accumulator_stack);
         if (use_nnue())
@@ -2302,7 +2344,12 @@ struct Searcher {
         StaticEvalInfo info{};
         info.keys = correction_keys(pos);
         const Color side = static_cast<Color>(pos.side_to_move);
-        info.raw = tt_raw_eval_available(probe) ? probe.data.eval : evaluate_raw_position(pos);
+        if (tt_raw_eval_available(probe)) {
+            mnue::v2::telemetry_note_tt_eval_reuse();
+            info.raw = probe.data.eval;
+        } else {
+            info.raw = evaluate_raw_position(pos);
+        }
         info.base = base_search_eval_from_raw(info.raw, pos);
         const int mixed_eval = std::clamp(
             info.base + correction_value(side, info.keys),
@@ -2583,6 +2630,7 @@ struct Searcher {
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
         ++nodes;
+        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -2747,6 +2795,7 @@ struct Searcher {
             return qsearch(pos, alpha, beta, ply);
 
         ++nodes;
+        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -4724,6 +4773,8 @@ void emit_iteration_info(
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
     searcher.p2_accumulator_stack.reset();
+    searcher.x1_accumulator_stack.reset();
+    searcher.v2_accumulator_stack.reset();
     searcher.root_side_to_move = keyed_root.side_to_move;
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
@@ -5390,6 +5441,8 @@ void emit_iteration_info(
 
         Searcher recovery_searcher(mem, recovery_limits);
         recovery_searcher.p2_accumulator_stack.reset();
+        recovery_searcher.x1_accumulator_stack.reset();
+        recovery_searcher.v2_accumulator_stack.reset();
         reset_searcher_iteration(
             recovery_searcher,
             timed_search ? search_start : Searcher::clock::now(),

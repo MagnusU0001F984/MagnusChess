@@ -4,6 +4,7 @@ TARGET := MagnusChess
 
 BUILD_PROFILE ?= auto
 PGO ?= 0
+MNUEV2_TELEMETRY ?= 0
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
@@ -25,6 +26,12 @@ endif
 ifneq ($(PGO),0)
   ifneq ($(PGO),1)
     $(error Unknown PGO value '$(PGO)'; use PGO=0 or PGO=1)
+  endif
+endif
+
+ifneq ($(MNUEV2_TELEMETRY),0)
+  ifneq ($(MNUEV2_TELEMETRY),1)
+    $(error Unknown MNUEV2_TELEMETRY value '$(MNUEV2_TELEMETRY)'; use 0 or 1)
   endif
 endif
 
@@ -55,7 +62,12 @@ SRC := \
 	Time.cpp \
 	TT.cpp \
 	Uci.cpp \
-	mnue/Mnue.cpp
+	mnue/Mnue.cpp \
+	mnue/MnueX1Features.cpp \
+	mnue/MnueX1Network.cpp \
+	mnue/MnueV2Features.cpp \
+	mnue/MnueV2Network.cpp \
+	mnue/MnueV2Telemetry.cpp
 
 FATHOM_DIR := ../third_party/fathom
 FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
@@ -135,7 +147,8 @@ WARN_FLAGS := \
 	-Wno-unused-parameter \
 	-Wno-sign-conversion
 
-CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS)
+CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) \
+	-DMAGNUS_MNUEV2_TELEMETRY=$(MNUEV2_TELEMETRY)
 
 BASE_CXXFLAGS := \
 	-std=c++20 \
