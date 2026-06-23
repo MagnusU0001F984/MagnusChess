@@ -95,7 +95,7 @@ inline constexpr int IIR_MIN_DEPTH              = 6;
 inline constexpr int IMPROVING_MARGIN           = 16;
 
 // --- RFP (Reverse Futility Pruning) --------------------------
-inline constexpr int RFP_BASE_MARGIN               = 48;
+inline constexpr int RFP_BASE_MARGIN               = 40;
 inline constexpr int RFP_DEPTH_MARGIN              = 64;
 inline constexpr int RFP_IMPROVING_MARGIN          = 40;
 inline constexpr int RFP_OPPONENT_WORSENING_MARGIN = 24;
@@ -108,28 +108,28 @@ inline constexpr int RFP_TT_QUIET_FAIL_HIGH_BONUS   = 24;
 inline constexpr int RAZOR_MARGIN[3]            = { 0, 280, 420 };
 
 // --- NMP (Null Move Pruning) ---------------------------------
-inline constexpr int NMP_STATIC_BASE            = 160;
-inline constexpr int NMP_STATIC_DEPTH_SLOPE     = 8;
-inline constexpr int NMP_IMPROVING_MARGIN       = 64;
+inline constexpr int NMP_STATIC_BASE            = 128;
+inline constexpr int NMP_STATIC_DEPTH_SLOPE     = 6;
+inline constexpr int NMP_IMPROVING_MARGIN       = 48;
 inline constexpr int NMP_EVAL_BUCKET            = 96;
 inline constexpr int NMP_MIN_REDUCTION          = 2;
 inline constexpr int NMP_VERIFICATION_MIN_DEPTH = 16;
 inline constexpr int NMP_VERIFICATION_MIN_SPAN  = 2;
 
 // --- Futility Pruning ----------------------------------------
-inline constexpr int FUTILITY_BASE_MARGIN       = 72;
-inline constexpr int FUTILITY_DEPTH_MARGIN      = 72;
+inline constexpr int FUTILITY_BASE_MARGIN       = 56;
+inline constexpr int FUTILITY_DEPTH_MARGIN      = 56;
 inline constexpr int FUTILITY_IMPROVING_MARGIN  = 24;
 inline constexpr int FUTILITY_HISTORY_DIVISOR   = 128;
 
 // --- SEE Pruning ---------------------------------------------
-inline constexpr int SEE_PRUNE_DEPTH_LIMIT      = 6;
-inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH        = 4;
-inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH        = 8;
+inline constexpr int SEE_PRUNE_DEPTH_LIMIT      = 8;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH        = 3;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH        = 10;
 inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
 
 // --- Delta / QS ----------------------------------------------
-inline constexpr int DELTA_MARGIN               = 200;
+inline constexpr int DELTA_MARGIN               = 176;
 inline constexpr int QS_ADJ_SHUFFLE_CAP         = 80;
 
 // --- ProbCut -------------------------------------------------
