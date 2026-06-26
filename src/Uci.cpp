@@ -29,7 +29,9 @@ SOFTWARE.
 #include <cctype>
 #include <chrono>
 #include <charconv>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <limits>
 #include <iostream>
@@ -47,6 +49,11 @@ SOFTWARE.
 #include "Evaluation.h"
 #include "Memory.h"
 #include "mnue/Mnue.h"
+#include "mnue/MnueX1Features.h"
+#include "mnue/MnueX1Network.h"
+#include "mnue/MnueV2Features.h"
+#include "mnue/MnueV2Network.h"
+#include "mnue/MnueV2Telemetry.h"
 #include "Nnue.h"
 #include "Search.h"
 #include "syzygy/Syzygy.h"
@@ -94,10 +101,6 @@ constexpr int DEFAULT_UCI_MULTIPV = 1;
 constexpr int DEFAULT_UCI_CONTEMPT = 0;
 constexpr int MIN_UCI_CONTEMPT = -10000;
 constexpr int MAX_UCI_CONTEMPT = 10000;
-
-static std::string default_mnue_p2_file() {
-    return "b7a644d5d.MNUE";
-}
 
 [[nodiscard]] const std::string& get_executable_dir() {
     static const std::string dir = []() -> std::string {
@@ -154,6 +157,17 @@ static std::string default_mnue_p2_file() {
         }
     );
     return ext == ".mnue";
+}
+
+[[nodiscard]] bool is_mnue_v2_file(const std::string& path) {
+    constexpr std::array<char, 8> Magic{
+        'M', 'N', 'U', 'E', 'V', '2', '\0', '\0'
+    };
+    std::ifstream input(path, std::ios::binary);
+    std::array<char, 8> actual{};
+    return input
+        && static_cast<bool>(input.read(actual.data(), actual.size()))
+        && actual == Magic;
 }
 
 struct PositionHistory {
@@ -700,6 +714,10 @@ enum class DisplayScoreModel {
 [[nodiscard]] const char* active_eval_name(bool use_nnue) noexcept {
     if (!use_nnue)
         return "hce";
+    if (mnue::x1::loaded())
+        return "mnue-x1";
+    if (mnue::v2::loaded())
+        return "mnue-v2";
     if (mnue::p2_loaded())
         return "mnue-p2";
     if (nnue::loaded())
@@ -729,6 +747,347 @@ enum class DisplayScoreModel {
         .loss = stm_wdl.win
     };
 }
+
+template<std::size_t Capacity>
+[[nodiscard]] bool feature_list_equals(
+    const mnue::v2::FeatureList<Capacity>& actual,
+    const std::vector<u32>& expected
+) noexcept {
+    if (actual.count != expected.size())
+        return false;
+    for (std::size_t i = 0; i < actual.count; ++i) {
+        if (actual.indices[i] != expected[i])
+            return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool parse_golden_indices(
+    const std::string& line,
+    std::string_view label,
+    std::vector<u32>& output
+) {
+    std::istringstream input(line);
+    std::string actual_label;
+    std::size_t count = 0;
+    if (!(input >> actual_label >> count) || actual_label != label)
+        return false;
+    output.clear();
+    output.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        u32 index = 0;
+        if (!(input >> index))
+            return false;
+        output.push_back(index);
+    }
+    return true;
+}
+
+[[nodiscard]] bool run_mnue_v2_golden_check(
+    const std::string& path,
+    memory::Memory& mem,
+    std::ostream& output
+) {
+    std::ifstream input(path);
+    if (!input) {
+        output << "info string could not open MNUEv2 golden fixture "
+            << path << '\n';
+        return false;
+    }
+    std::string line;
+    if (!std::getline(input, line) || line != "MNUEV2_GOLDEN 1") {
+        output << "info string invalid MNUEv2 golden fixture header\n";
+        return false;
+    }
+    if (!std::getline(input, line)
+        || !line.starts_with("NETWORK ")) {
+        return false;
+    }
+
+    u64 cases = 0;
+    u64 mismatches = 0;
+    double total_output_error = 0.0;
+    double maximum_output_error = 0.0;
+    while (std::getline(input, line)) {
+        if (line.empty())
+            continue;
+        if (line != "CASE")
+            return false;
+
+        std::array<std::string, 16> fields{};
+        for (std::string& field : fields) {
+            if (!std::getline(input, field))
+                return false;
+        }
+        if (!fields[0].starts_with("FEN ")
+            || !fields[1].starts_with("SIDE ")
+            || !fields[2].starts_with("MATERIAL ")
+            || !fields[3].starts_with("BUCKET ")
+            || !fields[13].starts_with("OUTPUT ")
+            || !fields[14].starts_with("SCORE ")
+            || fields[15] != "END") {
+            return false;
+        }
+
+        const std::string fen = fields[0].substr(4);
+        const char side = fields[1].size() > 5 ? fields[1][5] : 'w';
+        int expected_material = 0;
+        int expected_bucket = 0;
+        {
+            std::istringstream material(fields[2].substr(9));
+            std::istringstream bucket(fields[3].substr(7));
+            if (!(material >> expected_material)
+                || !(bucket >> expected_bucket)) {
+                return false;
+            }
+        }
+
+        std::array<std::vector<u32>, 6> expected_features{};
+        constexpr std::array<std::string_view, 6> Labels{{
+            "POSITION_STM",
+            "POSITION_NTM",
+            "ATTACK_STM",
+            "ATTACK_NTM",
+            "STRUCTURE_STM",
+            "STRUCTURE_NTM"
+        }};
+        for (std::size_t i = 0; i < Labels.size(); ++i) {
+            if (!parse_golden_indices(
+                    fields[4 + i],
+                    Labels[i],
+                    expected_features[i]
+                )) {
+                return false;
+            }
+        }
+
+        std::array<std::array<u64, 2>, 3> expected_hashes{};
+        constexpr std::array<std::string_view, 3> HashLabels{{
+            "POSITION_HASH",
+            "ATTACK_HASH",
+            "STRUCTURE_HASH"
+        }};
+        for (std::size_t i = 0; i < HashLabels.size(); ++i) {
+            std::istringstream hashes(fields[10 + i]);
+            std::string label;
+            if (!(hashes >> label)
+                || label != HashLabels[i]
+                || !(hashes >> std::hex
+                    >> expected_hashes[i][0]
+                    >> expected_hashes[i][1])) {
+                return false;
+            }
+        }
+
+        double expected_output = 0.0;
+        int expected_score = 0;
+        {
+            std::istringstream value(fields[13].substr(7));
+            std::istringstream score(fields[14].substr(6));
+            if (!(value >> expected_output)
+                || !(score >> expected_score)) {
+                return false;
+            }
+        }
+
+        Position position{};
+        if (!parse_fen(position, mem, fen))
+            return false;
+        mnue::v2::GoldenSnapshot actual{};
+        if (!mnue::v2::make_golden_snapshot(position, mem, actual))
+            return false;
+
+        const Color stm = side == 'b' ? BLACK : WHITE;
+        const Color ntm = ~stm;
+        const double output_error =
+            std::abs(actual.output - expected_output);
+        total_output_error += output_error;
+        maximum_output_error =
+            std::max(maximum_output_error, output_error);
+        bool matches =
+            actual.material == expected_material
+            && actual.bucket == expected_bucket
+            && feature_list_equals(
+                actual.features.position[stm],
+                expected_features[0]
+            )
+            && feature_list_equals(
+                actual.features.position[ntm],
+                expected_features[1]
+            )
+            && feature_list_equals(
+                actual.features.attack[stm],
+                expected_features[2]
+            )
+            && feature_list_equals(
+                actual.features.attack[ntm],
+                expected_features[3]
+            )
+            && feature_list_equals(
+                actual.features.structure[stm],
+                expected_features[4]
+            )
+            && feature_list_equals(
+                actual.features.structure[ntm],
+                expected_features[5]
+            )
+            && actual.position_hash[stm] == expected_hashes[0][0]
+            && actual.position_hash[ntm] == expected_hashes[0][1]
+            && actual.attack_hash[stm] == expected_hashes[1][0]
+            && actual.attack_hash[ntm] == expected_hashes[1][1]
+            && actual.structure_hash[stm] == expected_hashes[2][0]
+            && actual.structure_hash[ntm] == expected_hashes[2][1]
+            && output_error <= 1.0e-5
+            && actual.score == expected_score;
+        if (!matches) {
+            ++mismatches;
+            output << "info string MNUEv2 golden mismatch case "
+                << cases << " fen " << fen
+                << " expected_output " << expected_output
+                << " actual_output " << actual.output
+                << " expected_score " << expected_score
+                << " actual_score " << actual.score
+                << " expected_phash " << std::hex
+                << expected_hashes[0][0] << ':' << expected_hashes[0][1]
+                << " actual_phash "
+                << actual.position_hash[stm] << ':'
+                << actual.position_hash[ntm]
+                << " expected_ahash "
+                << expected_hashes[1][0] << ':' << expected_hashes[1][1]
+                << " actual_ahash "
+                << actual.attack_hash[stm] << ':'
+                << actual.attack_hash[ntm]
+                << " expected_shash "
+                << expected_hashes[2][0] << ':' << expected_hashes[2][1]
+                << " actual_shash "
+                << actual.structure_hash[stm] << ':'
+                << actual.structure_hash[ntm]
+                << std::dec << '\n';
+        }
+        ++cases;
+    }
+
+    output << "mnue v2 golden cases " << cases
+        << " mismatches " << mismatches
+        << " max_output_error " << maximum_output_error
+        << " mean_output_error "
+        << (cases == 0
+            ? 0.0
+            : total_output_error / static_cast<double>(cases))
+        << " ok " << (mismatches == 0 ? 1 : 0) << '\n';
+    return mismatches == 0;
+}
+
+[[nodiscard]] bool same_position_state(
+    const Position& left,
+    const Position& right
+) noexcept {
+    if (left.side_to_move != right.side_to_move
+        || left.ep_sq != right.ep_sq
+        || left.castling_rights != right.castling_rights
+        || left.halfmove_clock != right.halfmove_clock
+        || left.fullmove_number != right.fullmove_number
+        || left.key != right.key
+        || left.occupied != right.occupied
+        || left.material_signature != right.material_signature
+        || left.mnue_phase_units != right.mnue_phase_units) {
+        return false;
+    }
+    for (int square = 0; square < SQ_NB; ++square) {
+        if (left.board[square] != right.board[square])
+            return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool run_mnue_v2_special_move_checks(
+    memory::Memory& mem,
+    std::ostream& output
+) {
+    struct Scenario {
+        std::string_view name;
+        std::string_view fen;
+        std::string_view move;
+    };
+    constexpr std::array<Scenario, 13> Scenarios{{
+        {"quiet", "7k/8/8/8/8/8/8/4K3 w - - 0 1", "e1f1"},
+        {"capture", "7k/8/8/8/8/8/4p3/3QK3 w - - 0 1", "d1e2"},
+        {"pawn_move", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", "e2e4"},
+        {"pawn_capture", "7k/8/8/8/3p4/4P3/8/4K3 w - - 0 1", "e3d4"},
+        {"king_move", "7k/8/8/8/8/8/8/4K3 w - - 0 1", "e1e2"},
+        {"castle_kingside", "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1g1"},
+        {"castle_queenside", "r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1", "e1c1"},
+        {"promotion", "7k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8q"},
+        {"underpromotion", "7k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7a8n"},
+        {"capture_promotion", "1r5k/P7/8/8/8/8/8/4K3 w - - 0 1", "a7b8q"},
+        {"en_passant", "7k/8/8/3pP3/8/8/8/4K3 w - d6 0 1", "e5d6"},
+        {"slider_open", "4k3/8/8/8/8/8/B7/R3K3 w - - 0 1", "a2b3"},
+        {"discovered_attack", "4k3/8/8/8/8/8/4B3/4R1K1 w - - 0 1", "e2f3"}
+    }};
+
+    u64 checks = 0;
+    u64 mismatches = 0;
+    for (const Scenario& scenario : Scenarios) {
+        Position current{};
+        if (!parse_fen(current, mem, scenario.fen)) {
+            output << "info string MNUEv2 special FEN failed "
+                << scenario.name << '\n';
+            ++mismatches;
+            continue;
+        }
+        const Position initial = current;
+        Move move = Move(0);
+        if (!find_uci_move(current, mem, scenario.move, move)) {
+            output << "info string MNUEv2 special move not legal "
+                << scenario.name << ' ' << scenario.move << '\n';
+            ++mismatches;
+            continue;
+        }
+        mnue::v2::AccumulatorStack stack{};
+        if (!mnue::v2::debug_check_incremental(
+                current,
+                mem,
+                stack,
+                output
+            )) {
+            ++mismatches;
+        }
+        ++checks;
+        StateInfo state{};
+        stack.push(current, mem, move);
+        make_move(current, move, mem.tables, state);
+        stack.after_make(current, mem);
+        if (!mnue::v2::debug_check_incremental(
+                current,
+                mem,
+                stack,
+                output
+            )) {
+            ++mismatches;
+        }
+        ++checks;
+        unmake_move(current, move, mem.tables, state);
+        stack.pop(current, mem);
+        if (!same_position_state(current, initial)
+            || !mnue::v2::debug_check_incremental(
+                current,
+                mem,
+                stack,
+                output
+            )) {
+            ++mismatches;
+        }
+        ++checks;
+    }
+    output << "mnue v2 special moves"
+        << " scenarios " << Scenarios.size()
+        << " checks " << checks
+        << " mismatches " << mismatches
+        << " ok " << (mismatches == 0 ? 1 : 0)
+        << '\n';
+    return mismatches == 0;
+}
+
 [[nodiscard]] bool parse_go_command(
     const Position& pos,
     const memory::Memory& mem,
@@ -900,6 +1259,7 @@ struct UciSession {
     timeman::TimeManager time_manager{};
     bool use_nnue = true;
     bool enable_ponder = true;
+    bool full_pv = false;
     bool singular_telemetry = false;
     bool use_msv_smp = false;
     bool msv_info = false;
@@ -909,7 +1269,7 @@ struct UciSession {
     int syzygy_probe_limit = syzygy::DEFAULT_PROBE_LIMIT;
     bool syzygy_50_move_rule = true;
     std::string eval_file = default_eval_file();
-    std::string eval_file_p2 = default_mnue_p2_file();
+    std::string eval_file_p2{}; // empty → use embedded
     std::string syzygy_path{};
     std::atomic<bool> stop_requested{false};
     std::atomic<bool> search_running{false};
@@ -930,10 +1290,19 @@ struct UciSession {
     }
 
     [[nodiscard]] bool mnue_active() const noexcept {
-        return use_nnue && mnue::p2_loaded();
+        return use_nnue
+            && (
+                mnue::x1::loaded()
+                || mnue::v2::loaded()
+                || mnue::p2_loaded()
+            );
     }
 
     [[nodiscard]] std::string mnue_name() const {
+        if (mnue::x1::loaded())
+            return mnue::x1::path();
+        if (mnue::v2::loaded())
+            return mnue::v2::path();
         return mnue::p2_loaded() ? mnue::p2_path() : std::string{};
     }
 
@@ -989,7 +1358,7 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 3.5.111 by the Magnus developer ";
+        out << "MagnusChess 4.5.127 by the Magnus developer ";
         if (is_beta) {
             out << "& This is a beta version";
         }
@@ -997,10 +1366,10 @@ struct UciSession {
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess 3.5.111 ";
+        out << "id name MagnusChess4.5.127";
         
         if(is_beta) {
-            out << "for Beta Testing";
+            out << "-dev";
         }
         
         out << '\n';
@@ -1022,6 +1391,7 @@ struct UciSession {
         out << "option name Clear Hash type button\n";
         out << "option name UseNNUE type check default true\n";
         out << "option name Ponder type check default true\n";
+        out << "option name FullPV type check default false\n";
         out << "option name Singular Telemetry type check default false\n";
         out << "option name UseMsvSmp type check default false\n";
         out << "option name MsvInfo type check default false\n";
@@ -1035,7 +1405,7 @@ struct UciSession {
             << syzygy::DEFAULT_PROBE_LIMIT
             << " min " << syzygy::MIN_PROBE_LIMIT
             << " max " << syzygy::MAX_PROBE_LIMIT << "\n";
-        out << "option name MNUEfile type string default " << eval_file_p2 << '\n';
+        out << "option name MNUEfile type string default mm-b421bfeb0.MNUE\n";
         out << "uciok" << std::endl;
     }
 
@@ -1088,25 +1458,56 @@ struct UciSession {
 
 
     [[nodiscard]] bool ensure_mnue_loaded(std::ostream* out) {
-        if (eval_file_p2.empty())
-            return false;
-
-        const std::string p2_resolved = resolve_file_path(eval_file_p2);
-
-        if (mnue::p2_loaded() && mnue::p2_path() == p2_resolved)
+        // If v2 was loaded manually via mnuev2load, keep it.
+        if (mnue::v2::loaded())
             return true;
 
-        if (!mnue::load_p2(p2_resolved)) {
+        // External file explicitly set by user — load from disk.
+        if (!eval_file_p2.empty()) {
+            const std::string p2_resolved = resolve_file_path(eval_file_p2);
+
+            if (mnue::p2_loaded() && mnue::p2_path() == p2_resolved)
+                return true;
+
+            if (is_mnue_v2_file(p2_resolved)) {
+                if (!mnue::v2::load(p2_resolved)) {
+                    if (out)
+                        *out << "info string failed to load mnue v2: "
+                            << mnue::v2::last_error() << '\n';
+                    return false;
+                }
+                mnue::unload_p2();
+                if (out)
+                    mnue::v2::debug_dump_network(*out);
+                return true;
+            }
+
+            if (mnue::load_p2(p2_resolved)) {
+                mnue::v2::unload();
+                if (out)
+                    *out << "info string loaded mnue " << p2_resolved << '\n';
+                return true;
+            }
+
             if (out)
-                *out << "info string failed to load mnue p2: "
+                *out << "info string failed to load mnue: "
                      << mnue::last_error() << '\n';
             return false;
         }
 
-        if (out)
-            *out << "info string loaded mnue p2 " << p2_resolved << '\n';
+        // Default: compile-time embedded P2 network.
+        if (mnue::p2_loaded() && mnue::p2_path() == "mm-b421bfeb0.MNUE")
+            return true;
 
-        return true;
+        if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
+            if (out)
+                *out << "info string loaded embedded mnue p2\n";
+            return true;
+        }
+
+        if (out)
+            *out << "info string no MNUE network available\n";
+        return false;
     }
 
     [[nodiscard]] bool ensure_eval_loaded(std::ostream* out) {
@@ -1192,6 +1593,11 @@ struct UciSession {
             if (parse_bool(value, parsed))
                 enable_ponder = parsed;
         }
+        else if (name == "FullPV") {
+            bool parsed = false;
+            if (parse_bool(value, parsed))
+                full_pv = parsed;
+        }
         else if (name == "Singular Telemetry") {
             bool parsed = false;
             if (parse_bool(value, parsed))
@@ -1245,19 +1651,27 @@ struct UciSession {
             }
         }
         else if (name == "MNUEfile") {
-            if (!value.empty()) {
-                const std::string resolved = resolve_file_path(value);
-                std::error_code ec;
-                if (!std::filesystem::exists(resolved, ec) || ec) {
-                    out << "info string MNUEfile not found: " << value << '\n';
-                    return;
-                }
-                eval_file_p2 = resolved;
+            // "<embedded>" or empty → revert to built-in network.
+            if (value.empty() || value == "<embedded>") {
+                eval_file_p2.clear();
+                mnue::v2::unload();
+                mnue::unload_p2();
                 memory::memory_clear_hash(mem);
-
                 if (use_nnue && !ensure_eval_loaded(&out))
                     out << "info string eval unavailable, search will fall back to hce\n";
+                return;
             }
+            const std::string resolved = resolve_file_path(value);
+            std::error_code ec;
+            if (!std::filesystem::exists(resolved, ec) || ec) {
+                out << "info string MNUEfile not found: " << value << '\n';
+                return;
+            }
+            eval_file_p2 = resolved;
+            memory::memory_clear_hash(mem);
+
+            if (use_nnue && !ensure_eval_loaded(&out))
+                out << "info string eval unavailable, search will fall back to hce\n";
         }
     }
 
@@ -1298,6 +1712,35 @@ struct UciSession {
                 << wdl_white.draw << ' '
                 << wdl_white.loss << '\n';
 
+        }
+
+        if (mnue::v2::loaded()) {
+            const int raw_stm = mnue::v2::evaluate_reference(pos, mem);
+            const int search_stm = mnue::search_score(raw_stm, pos);
+            const int search_cp_stm =
+                mnue::search_score_to_cp(search_stm, pos);
+            const mnue::WdlTriplet wdl_white = white_pov_wdl(
+                pos,
+                mnue::search_score_to_wdl(search_stm, pos)
+            );
+            out << "info string mnue v2 path "
+                << mnue::v2::path() << '\n';
+            out << "info string mnue v2 material "
+                << mnue::v2::material_units(pos) << '\n';
+            out << "info string mnue v2 bucket "
+                << mnue::v2::material_bucket(pos) << '\n';
+            out << "info string mnue v2 output "
+                << mnue::v2::evaluate_reference_output(pos, mem) << '\n';
+            out << "info string mnue v2 raw "
+                << white_pov_score(pos, raw_stm) << '\n';
+            out << "info string mnue v2 search "
+                << white_pov_score(pos, search_stm) << '\n';
+            out << "info string mnue v2 searchcp "
+                << white_pov_score(pos, search_cp_stm) << '\n';
+            out << "info string mnue v2 wdl "
+                << wdl_white.win << ' '
+                << wdl_white.draw << ' '
+                << wdl_white.loss << '\n';
         }
 
         if (nnue::loaded()) {
@@ -1387,7 +1830,7 @@ struct UciSession {
 
         ensure_search_eval_ready(out, "info string nnue unavailable, sort will use hce");
         const DisplayScoreModel score_model =
-            use_nnue && mnue::p2_loaded()
+            mnue_active()
                 ? DisplayScoreModel::Mnue
                 : (use_nnue && nnue::loaded() ? DisplayScoreModel::Nnue : DisplayScoreModel::Hce);
 
@@ -1622,13 +2065,19 @@ struct UciSession {
             return;
         }
 
-        if (mnue_active()){
-            std :: cout << "info string MNUE evaluation using " << mnue_name()
-                       << " (20.1 MB, (1,32,16,1024,10240), "
-                       << mnue::eval_simd_name() << ")\n";
+        if (mnue_active()) {
+            if (mnue::v2::loaded()) {
+                mnue::v2::debug_dump_network(std::cout);
+            } else {
+                std::cout << "info string MNUE evaluation using "
+                    << mnue_name()
+                    << " (20.1 MB, (1,32,16,1024,10240), "
+                    << mnue::eval_simd_name() << ")\n";
+            }
         }
 
         limits.contempt = contempt;
+        limits.full_pv = full_pv;
         limits.singular_telemetry = singular_telemetry;
         limits.use_msv_smp = use_msv_smp;
         limits.msv_info = msv_info;
@@ -1757,6 +2206,7 @@ struct UciSession {
 
             const std::string resolved = resolve_file_path(path);
             if (mnue::load_p2(resolved)) {
+                mnue::v2::unload();
                 memory::memory_clear_hash(mem);
                 out << "info string loaded mnue p2 " << resolved << '\n';
             } else {
@@ -1779,14 +2229,658 @@ struct UciSession {
         if (line == "mnuedebug") {
             if (use_nnue)
                 (void)ensure_eval_loaded(&out);
-            mnue::debug_dump_p2_features(pos, out);
+            if (mnue::v2::loaded())
+                mnue::v2::debug_dump_position(pos, mem, out);
+            else
+                mnue::debug_dump_p2_features(pos, out);
             return true;
         }
 
         if (line == "mnuecheck") {
             if (use_nnue)
                 (void)ensure_eval_loaded(&out);
-            (void)mnue::debug_check_p2_incremental(pos, out);
+            if (mnue::v2::loaded()) {
+                mnue::v2::AccumulatorStack stack{};
+                (void)mnue::v2::debug_check_incremental(
+                    pos,
+                    mem,
+                    stack,
+                    out
+                );
+            } else {
+                (void)mnue::debug_check_p2_incremental(pos, out);
+            }
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2load")) {
+            const std::string path{
+                arrow_arguments(command_arguments(line, "mnuev2load"))
+            };
+            if (path.empty()) {
+                out << "info string usage: mnuev2load <path-to-v2.mnue>\n";
+                return true;
+            }
+            const std::string resolved = resolve_file_path(path);
+            if (mnue::v2::load(resolved)) {
+                mnue::unload_p2();
+                eval_file_p2 = resolved;
+                memory::memory_clear_hash(mem);
+                mnue::v2::debug_dump_network(out);
+            } else {
+                out << "info string failed to load mnue v2: "
+                    << mnue::v2::last_error() << '\n';
+            }
+            return true;
+        }
+
+        if (line == "mnuev2info") {
+            mnue::v2::debug_dump_network(out);
+            return true;
+        }
+
+        if (line == "mnuev2debug") {
+            mnue::v2::debug_dump_position(pos, mem, out);
+            return true;
+        }
+
+        if (line == "mnuev2eval") {
+            if (!mnue::v2::loaded()) {
+                out << "mnue v2 loaded 0\n";
+            } else {
+                mnue::v2::AccumulatorStack stack{};
+                out << "mnue v2 loaded 1"
+                    << " bucket " << mnue::v2::material_bucket(pos)
+                    << " output "
+                    << mnue::v2::evaluate_reference_output(pos, mem)
+                    << " reference "
+                    << mnue::v2::evaluate_reference(pos, mem)
+                    << " incremental "
+                    << mnue::v2::evaluate_incremental(pos, mem, stack)
+                    << '\n';
+            }
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2scalar")) {
+            const std::string value{
+                arrow_arguments(
+                    command_arguments(line, "mnuev2scalar")
+                )
+            };
+            if (value == "on" || value == "true" || value == "1")
+                mnue::v2::set_force_scalar(true);
+            else if (value == "off" || value == "false" || value == "0")
+                mnue::v2::set_force_scalar(false);
+            else if (!value.empty()) {
+                out << "info string usage: mnuev2scalar [on|off]\n";
+                return true;
+            }
+            out << "mnue v2 force_scalar "
+                << (mnue::v2::force_scalar() ? 1 : 0)
+                << " backend " << mnue::v2::backend_name() << '\n';
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2check")) {
+            if (!mnue::v2::loaded()) {
+                out << "mnue v2 loaded 0\n";
+                return true;
+            }
+
+            int sequences = 10;
+            int plies = 32;
+            {
+                std::istringstream input{std::string(line)};
+                std::string command;
+                input >> command;
+                if (input >> sequences) {
+                    if (!(input >> plies)) {
+                        out << "info string usage: mnuev2check [sequences plies]\n";
+                        return true;
+                    }
+                }
+            }
+            sequences = std::clamp(sequences, 1, 10000);
+            plies = std::clamp(plies, 1, 128);
+
+            u64 checks = 0;
+            u64 mismatches = 0;
+            for (int sequence = 0; sequence < sequences; ++sequence) {
+                Position current{};
+                position_copy_without_accumulators(current, pos);
+                mnue::v2::AccumulatorStack stack{};
+                std::array<Move, 128> moves{};
+                std::array<StateInfo, 128> states{};
+                int depth = 0;
+                u32 rng = static_cast<u32>(
+                    current.key ^ (current.key >> 32)
+                    ^ (0x9E3779B9u * static_cast<u32>(sequence + 1))
+                );
+
+                if (!mnue::v2::debug_check_incremental(
+                        current,
+                        mem,
+                        stack,
+                        out
+                    )) {
+                    ++mismatches;
+                }
+                ++checks;
+
+                for (int ply = 0; ply < plies; ++ply) {
+                    MoveList legal{};
+                    generate_legal(current, mem, legal);
+                    if (legal.size == 0)
+                        break;
+                    rng = rng * 1664525u + 1013904223u;
+                    const Move move = legal.moves[
+                        rng % static_cast<u32>(legal.size)
+                    ];
+                    moves[depth] = move;
+                    stack.push(current, mem, move);
+                    make_move(
+                        current,
+                        move,
+                        mem.tables,
+                        states[depth]
+                    );
+                    stack.after_make(current, mem);
+                    ++depth;
+                    if (!mnue::v2::debug_check_incremental(
+                            current,
+                            mem,
+                            stack,
+                            out
+                        )) {
+                        out << "info string MNUEv2 random mismatch make"
+                            << " sequence " << sequence
+                            << " ply " << ply
+                            << " move "
+                            << search::move_to_uci(move)
+                            << " fen " << display_fen(current)
+                            << '\n';
+                        ++mismatches;
+                    }
+                    ++checks;
+                }
+
+                while (depth > 0) {
+                    --depth;
+                    unmake_move(
+                        current,
+                        moves[depth],
+                        mem.tables,
+                        states[depth]
+                    );
+                    stack.pop(current, mem);
+                    if (!mnue::v2::debug_check_incremental(
+                            current,
+                            mem,
+                            stack,
+                            out
+                        )) {
+                        ++mismatches;
+                    }
+                    ++checks;
+                }
+                if (stack.size() != 1)
+                    ++mismatches;
+            }
+
+            out << "mnue v2 random make/unmake"
+                << " sequences " << sequences
+                << " plies " << plies
+                << " checks " << checks
+                << " mismatches " << mismatches
+                << " ok " << (mismatches == 0 ? 1 : 0)
+                << '\n';
+            return true;
+        }
+
+        if (line == "mnuev2bucketcheck") {
+            (void)mnue::v2::debug_bucket_selftest(out);
+            return true;
+        }
+
+        if (line == "mnuev2specialcheck") {
+            if (!mnue::v2::loaded()) {
+                out << "mnue v2 loaded 0\n";
+                return true;
+            }
+            (void)run_mnue_v2_special_move_checks(mem, out);
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2telemetry")) {
+            if (!mnue::v2::loaded()) {
+                out << "mnue v2 loaded 0\n";
+                return true;
+            }
+            int plies = 100;
+            {
+                std::istringstream input{std::string(line)};
+                std::string command;
+                input >> command;
+                if (!(input >> plies))
+                    plies = 100;
+            }
+            plies = std::clamp(plies, 1, 128);
+            Position current{};
+            position_copy_without_accumulators(current, pos);
+            mnue::v2::AccumulatorStack stack{};
+            std::array<Move, 128> moves{};
+            std::array<StateInfo, 128> states{};
+            int depth = 0;
+            u32 rng = 0x5EED1234u;
+            (void)mnue::v2::evaluate_incremental(
+                current,
+                mem,
+                stack
+            );
+            for (int ply = 0; ply < plies; ++ply) {
+                MoveList legal{};
+                generate_legal(current, mem, legal);
+                if (legal.size == 0)
+                    break;
+                rng = rng * 1664525u + 1013904223u;
+                const Move move =
+                    legal.moves[rng % static_cast<u32>(legal.size)];
+                moves[depth] = move;
+                stack.push(current, mem, move);
+                make_move(current, move, mem.tables, states[depth]);
+                stack.after_make(current, mem);
+                ++depth;
+                (void)mnue::v2::evaluate_incremental(
+                    current,
+                    mem,
+                    stack
+                );
+            }
+            while (depth > 0) {
+                --depth;
+                unmake_move(
+                    current,
+                    moves[depth],
+                    mem.tables,
+                    states[depth]
+                );
+                stack.pop(current, mem);
+                (void)mnue::v2::evaluate_incremental(
+                    current,
+                    mem,
+                    stack
+                );
+            }
+            mnue::v2::print_telemetry(stack.telemetry(), out);
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2cycles")) {
+            const std::string action{
+                arrow_arguments(
+                    command_arguments(line, "mnuev2cycles")
+                )
+            };
+            if (action == "reset") {
+                mnue::v2::reset_cycle_telemetry();
+                out << "mnue v2 cycle telemetry reset\n";
+            } else if (action.empty() || action == "report") {
+                mnue::v2::print_cycle_telemetry(out);
+            } else {
+                out << "info string usage: mnuev2cycles [reset|report]\n";
+            }
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2bench")) {
+            if (!mnue::v2::loaded()) {
+                out << "mnue v2 loaded 0\n";
+                return true;
+            }
+            int iterations = 1000;
+            int repeats = 5;
+            {
+                std::istringstream input{std::string(line)};
+                std::string command;
+                input >> command;
+                if (input >> iterations)
+                    (void)(input >> repeats);
+            }
+            iterations = std::clamp(iterations, 1, 1000000);
+            repeats = std::clamp(repeats, 3, 15);
+            const auto summarize = [&](const char* name, const auto& run) {
+                std::vector<double> rates;
+                rates.reserve(static_cast<std::size_t>(repeats));
+                i64 checksum = 0;
+                for (int repeat = 0; repeat < repeats; ++repeat) {
+                    const auto start =
+                        std::chrono::steady_clock::now();
+                    checksum += run();
+                    const auto stop =
+                        std::chrono::steady_clock::now();
+                    const double seconds =
+                        std::chrono::duration<double>(
+                            stop - start
+                        ).count();
+                    rates.push_back(
+                        static_cast<double>(iterations) / seconds
+                    );
+                }
+                std::sort(rates.begin(), rates.end());
+                out << "mnue v2 bench " << name
+                    << " iterations " << iterations
+                    << " repeats " << repeats
+                    << " median_per_second "
+                    << static_cast<u64>(
+                        rates[rates.size() / 2]
+                    )
+                    << " min " << static_cast<u64>(rates.front())
+                    << " max " << static_cast<u64>(rates.back())
+                    << " checksum " << checksum
+                    << '\n';
+            };
+
+            summarize("full_refresh_scalar", [&]() {
+                i64 checksum = 0;
+                for (int i = 0; i < iterations; ++i)
+                    checksum += mnue::v2::evaluate_reference(pos, mem);
+                return checksum;
+            });
+
+            const bool previous_force = mnue::v2::force_scalar();
+            mnue::v2::set_force_scalar(true);
+            summarize("incremental_scalar_cached", [&]() {
+                mnue::v2::AccumulatorStack stack{};
+                i64 checksum = 0;
+                for (int i = 0; i < iterations; ++i) {
+                    checksum += mnue::v2::evaluate_incremental(
+                        pos,
+                        mem,
+                        stack
+                    );
+                }
+                return checksum;
+            });
+            mnue::v2::set_force_scalar(false);
+            summarize("incremental_selected_backend_cached", [&]() {
+                mnue::v2::AccumulatorStack stack{};
+                i64 checksum = 0;
+                for (int i = 0; i < iterations; ++i) {
+                    checksum += mnue::v2::evaluate_incremental(
+                        pos,
+                        mem,
+                        stack
+                    );
+                }
+                return checksum;
+            });
+
+            MoveList legal{};
+            generate_legal(pos, mem, legal);
+            if (legal.size > 0) {
+                const auto run_make_eval_unmake = [&]() {
+                    Position current{};
+                    position_copy_without_accumulators(current, pos);
+                    mnue::v2::AccumulatorStack stack{};
+                    (void)mnue::v2::evaluate_incremental(
+                        current,
+                        mem,
+                        stack
+                    );
+                    i64 checksum = 0;
+                    for (int i = 0; i < iterations; ++i) {
+                        const Move move = legal.moves[
+                            i % legal.size
+                        ];
+                        StateInfo state{};
+                        stack.push(current, mem, move);
+                        make_move(
+                            current,
+                            move,
+                            mem.tables,
+                            state
+                        );
+                        stack.after_make(current, mem);
+                        checksum += mnue::v2::evaluate_incremental(
+                            current,
+                            mem,
+                            stack
+                        );
+                        unmake_move(
+                            current,
+                            move,
+                            mem.tables,
+                            state
+                        );
+                        stack.pop(current, mem);
+                    }
+                    return checksum;
+                };
+                mnue::v2::set_force_scalar(true);
+                summarize(
+                    "make_eval_unmake_scalar",
+                    run_make_eval_unmake
+                );
+                mnue::v2::set_force_scalar(false);
+                summarize(
+                    "make_eval_unmake_selected_backend",
+                    run_make_eval_unmake
+                );
+            }
+            mnue::v2::set_force_scalar(previous_force);
+            return true;
+        }
+
+        if (line == "mnuev2simdcheck") {
+            (void)mnue::v2::debug_attack_kernel_selftest(out);
+            return true;
+        }
+
+        if (line == "mnuev2loadcheck") {
+            (void)mnue::v2::debug_loader_selftest(out);
+            return true;
+        }
+
+        if (command_starts_with(line, "mnuev2goldencheck")) {
+            const std::string fixture{
+                arrow_arguments(
+                    command_arguments(line, "mnuev2goldencheck")
+                )
+            };
+            if (fixture.empty()) {
+                out << "info string usage: mnuev2goldencheck <fixture>\n";
+                return true;
+            }
+            ensure_attack_ready();
+            (void)run_mnue_v2_golden_check(
+                resolve_file_path(fixture),
+                mem,
+                out
+            );
+            return true;
+        }
+
+        if (mnue::x1::loaded()) {
+            mnue::x1::AccumulatorStack stack{};
+            const int raw_stm =
+                mnue::x1::evaluate_incremental(pos, mem, stack);
+            const int search_stm = mnue::search_score(raw_stm, pos);
+            const int search_cp_stm =
+                mnue::search_score_to_cp(search_stm, pos);
+
+            out << "info string mnue x1 path "
+                << mnue::x1::path() << '\n';
+            out << "info string mnue x1 raw "
+                << white_pov_score(pos, raw_stm) << '\n';
+            out << "info string mnue x1 search "
+                << white_pov_score(pos, search_stm) << '\n';
+            out << "info string mnue x1 searchcp "
+                << white_pov_score(pos, search_cp_stm) << '\n';
+        }
+
+        if (command_starts_with(line, "mnuex1load")) {
+            const std::string path{
+                arrow_arguments(command_arguments(line, "mnuex1load"))
+            };
+            if (path.empty()) {
+                out << "info string usage: mnuex1load <path-to-x1.mnue>\n";
+                return true;
+            }
+
+            const std::string resolved = resolve_file_path(path);
+            if (mnue::x1::load(resolved)) {
+                out << "info string loaded mnue x1 " << resolved << '\n';
+            } else {
+                out << "info string failed to load mnue x1: "
+                    << mnue::x1::last_error() << '\n';
+            }
+            return true;
+        }
+
+        if (line == "mnuex1unload") {
+            mnue::x1::unload();
+            memory::memory_clear_hash(mem);
+            out << "info string unloaded mnue x1\n";
+            return true;
+        }
+
+        if (line == "mnuex1debug") {
+            mnue::x1::debug_dump_features(pos, mem, out);
+            return true;
+        }
+
+        if (line == "mnuex1eval") {
+            if (!mnue::x1::loaded()) {
+                out << "mnue x1 loaded 0\n";
+            } else {
+                out << "mnue x1 loaded 1"
+                    << " bucket " << mnue::x1::output_bucket(pos)
+                    << " reference "
+                    << mnue::x1::evaluate_reference(pos, mem)
+                    << " fast "
+                    << mnue::x1::evaluate_fast(pos, mem)
+                    << " path " << mnue::x1::path()
+                    << '\n';
+            }
+            return true;
+        }
+
+        if (line == "mnuex1bench") {
+            if (!mnue::x1::loaded()) {
+                out << "mnue x1 loaded 0\n";
+                return true;
+            }
+
+            constexpr int Iterations = 10000;
+            using EvalFn = int (*)(
+                const Position&,
+                const memory::Memory&
+            ) noexcept;
+            const auto run = [&](const char* name, EvalFn evaluator) {
+                i64 checksum = 0;
+                const auto start = std::chrono::steady_clock::now();
+                for (int i = 0; i < Iterations; ++i)
+                    checksum += evaluator(pos, mem);
+                const auto stop = std::chrono::steady_clock::now();
+                const double seconds =
+                    std::chrono::duration<double>(stop - start).count();
+                const double evaluations_per_second =
+                    static_cast<double>(Iterations) / seconds;
+
+                out << "mnue x1 " << name << " bench"
+                    << " iterations " << Iterations
+                    << " seconds " << std::fixed << std::setprecision(6)
+                    << seconds
+                    << " evals_per_second " << std::setprecision(0)
+                    << evaluations_per_second
+                    << " checksum " << checksum
+                    << std::defaultfloat
+                    << '\n';
+            };
+
+            run("reference", &mnue::x1::evaluate_reference);
+            run("fast", &mnue::x1::evaluate_fast);
+
+            mnue::x1::AccumulatorStack stack{};
+            (void)mnue::x1::evaluate_incremental(pos, mem, stack);
+            i64 checksum = 0;
+            const auto start = std::chrono::steady_clock::now();
+            for (int i = 0; i < Iterations; ++i) {
+                checksum += mnue::x1::evaluate_incremental(
+                    pos,
+                    mem,
+                    stack
+                );
+            }
+            const auto stop = std::chrono::steady_clock::now();
+            const double seconds =
+                std::chrono::duration<double>(stop - start).count();
+            out << "mnue x1 cached bench"
+                << " iterations " << Iterations
+                << " seconds " << std::fixed << std::setprecision(6)
+                << seconds
+                << " evals_per_second " << std::setprecision(0)
+                << static_cast<double>(Iterations) / seconds
+                << " checksum " << checksum
+                << std::defaultfloat
+                << '\n';
+            return true;
+        }
+
+        if (line == "mnuex1check") {
+            if (!mnue::x1::loaded()) {
+                out << "mnue x1 loaded 0\n";
+                return true;
+            }
+
+            constexpr int CheckDepth = 2;
+            mnue::x1::AccumulatorStack stack{};
+            u64 checked_positions = 0;
+            u64 mismatches = 0;
+
+            const auto visit = [&](auto&& self, Position& current, int depth)
+                -> void {
+                const int rebuilt =
+                    mnue::x1::evaluate_fast(current, mem);
+                const int incremental =
+                    mnue::x1::evaluate_incremental(current, mem, stack);
+                ++checked_positions;
+                if (rebuilt != incremental)
+                    ++mismatches;
+
+                if (depth == 0)
+                    return;
+
+                MoveList moves{};
+                generate_legal(current, mem, moves);
+                for (int i = 0; i < moves.size; ++i) {
+                    const Move move = moves.moves[i];
+                    StateInfo state{};
+                    stack.push();
+                    make_move(current, move, mem.tables, state);
+                    self(self, current, depth - 1);
+                    unmake_move(current, move, mem.tables, state);
+                    stack.pop();
+                }
+            };
+
+            Position check_position{};
+            position_copy_without_accumulators(check_position, pos);
+            visit(visit, check_position, CheckDepth);
+            const auto stats = stack.stats();
+
+            out << "mnue x1 incremental check"
+                << " depth " << CheckDepth
+                << " positions " << checked_positions
+                << " mismatches " << mismatches
+                << " feature_builds " << stats.feature_builds
+                << " rebuilds " << stats.rebuilds
+                << " diff_updates " << stats.diff_updates
+                << " added_rows " << stats.added_rows
+                << " removed_rows " << stats.removed_rows
+                << " ok " << (mismatches == 0 ? 1 : 0)
+                << '\n';
             return true;
         }
 

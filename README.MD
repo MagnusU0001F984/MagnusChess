@@ -283,6 +283,9 @@ training workload is `bench`; override it with `PGO_BENCH_ARGS`, if needed.
 
 # search: search <depth> <hash_mb>
 ./src/build/MagnusChess search 8 64
+
+# TT benchmark: -tt -hash <mb> [-entries <count>]
+./src/build/MagnusChess -tt -hash 64
 ```
 
 ---

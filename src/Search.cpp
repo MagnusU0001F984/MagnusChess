@@ -47,6 +47,9 @@ SOFTWARE.
 #include "Nmp.h"
 #include "Nnue.h"
 #include "mnue/Mnue.h"
+#include "mnue/MnueX1Network.h"
+#include "mnue/MnueV2Network.h"
+#include "mnue/MnueV2Telemetry.h"
 #include "See.h"
 #include "syzygy/Syzygy.h"
 
@@ -639,6 +642,8 @@ struct Searcher {
     int root_side_to_move = WHITE;
     HistoryTables history_tables{};
     mutable mnue::P2AccumulatorStack p2_accumulator_stack{};
+    mutable mnue::x1::AccumulatorStack x1_accumulator_stack{};
+    mutable mnue::v2::AccumulatorStack v2_accumulator_stack{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
@@ -1932,7 +1937,20 @@ struct Searcher {
     }
 
     [[nodiscard]] inline bool use_mnue() const noexcept {
-        return limits.use_nnue && mnue::p2_loaded();
+        return limits.use_nnue
+            && (
+                mnue::x1::loaded()
+                || mnue::v2::loaded()
+                || mnue::p2_loaded()
+            );
+    }
+
+    [[nodiscard]] inline bool use_mnue_x1() const noexcept {
+        return limits.use_nnue && mnue::x1::loaded();
+    }
+
+    [[nodiscard]] inline bool use_mnue_v2() const noexcept {
+        return limits.use_nnue && mnue::v2::loaded();
     }
 
     inline void make_search_move(
@@ -1940,9 +1958,15 @@ struct Searcher {
         Move move,
         StateInfo& st
     ) noexcept {
-        if (use_mnue())
+        if (use_mnue_x1())
+            x1_accumulator_stack.push();
+        else if (use_mnue_v2())
+            v2_accumulator_stack.push(pos, mem, move);
+        else if (use_mnue())
             p2_accumulator_stack.push(pos, move);
         make_move(pos, move, mem.tables, st);
+        if (use_mnue_v2())
+            v2_accumulator_stack.after_make(pos, mem);
     }
 
     inline void unmake_search_move(
@@ -1951,11 +1975,29 @@ struct Searcher {
         const StateInfo& st
     ) noexcept {
         unmake_move(pos, move, mem.tables, st);
-        if (use_mnue())
+        if (use_mnue_x1())
+            x1_accumulator_stack.pop();
+        else if (use_mnue_v2())
+            v2_accumulator_stack.pop(pos, mem);
+        else if (use_mnue())
             p2_accumulator_stack.pop();
     }
 
     [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
+        if (use_mnue_x1()) {
+            return mnue::x1::evaluate_incremental(
+                pos,
+                mem,
+                x1_accumulator_stack
+            );
+        }
+        if (use_mnue_v2()) {
+            return mnue::v2::evaluate_incremental(
+                pos,
+                mem,
+                v2_accumulator_stack
+            );
+        }
         if (use_mnue())
             return mnue::eval_p2(pos, p2_accumulator_stack);
         if (use_nnue())
@@ -2302,7 +2344,12 @@ struct Searcher {
         StaticEvalInfo info{};
         info.keys = correction_keys(pos);
         const Color side = static_cast<Color>(pos.side_to_move);
-        info.raw = tt_raw_eval_available(probe) ? probe.data.eval : evaluate_raw_position(pos);
+        if (tt_raw_eval_available(probe)) {
+            mnue::v2::telemetry_note_tt_eval_reuse();
+            info.raw = probe.data.eval;
+        } else {
+            info.raw = evaluate_raw_position(pos);
+        }
         info.base = base_search_eval_from_raw(info.raw, pos);
         const int mixed_eval = std::clamp(
             info.base + correction_value(side, info.keys),
@@ -2583,6 +2630,7 @@ struct Searcher {
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
         ++nodes;
+        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -2747,6 +2795,7 @@ struct Searcher {
             return qsearch(pos, alpha, beta, ply);
 
         ++nodes;
+        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -4400,6 +4449,98 @@ struct IterativeWorkerResult {
     memory::Bound score_bound = memory::BOUND_EXACT;
 };
 
+[[nodiscard]] bool pv_move_is_legal(
+    const Position& pos,
+    const memory::Memory& mem,
+    Move move
+) noexcept {
+    if (move_is_none(move))
+        return false;
+
+    MoveList legal{};
+    generate_legal(pos, mem, legal);
+    for (int i = 0; i < legal.size; ++i)
+        if (legal.moves[i] == move)
+            return true;
+
+    return false;
+}
+
+[[nodiscard]] int reconstruct_tt_pv(
+    Position& root,
+    memory::Memory& mem,
+    const SearchLimits& limits,
+    Move first_move,
+    Move* out,
+    int max_len
+) noexcept {
+    if (move_is_none(first_move) || out == nullptr || max_len <= 0)
+        return 0;
+
+    const int length_limit = std::clamp(max_len, 0, MAX_PLY);
+    std::array<StateInfo, MAX_PLY> states{};
+    std::array<Move, MAX_PLY> made_moves{};
+    std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 1> keys{};
+    int key_count = 0;
+
+    const int history_count =
+        std::min(limits.game_history_count, MAX_GAME_HISTORY);
+    for (int i = 0; i < history_count; ++i)
+        keys[static_cast<std::size_t>(key_count++)] = limits.game_history_keys[i];
+    keys[static_cast<std::size_t>(key_count++)] = root.key;
+
+    int pv_length = 0;
+    while (pv_length < length_limit) {
+        const Move move = pv_length == 0
+            ? first_move
+            : [&]() noexcept {
+                const memory::TTProbe probe = memory::tt_probe(mem.tt, root.key);
+                return probe.hit
+                    ? static_cast<Move>(probe.data.move)
+                    : Move(0);
+            }();
+
+        if (!pv_move_is_legal(root, mem, move))
+            break;
+
+        out[pv_length] = move;
+        made_moves[static_cast<std::size_t>(pv_length)] = move;
+        make_move(
+            root,
+            move,
+            mem.tables,
+            states[static_cast<std::size_t>(pv_length)]
+        );
+        ++pv_length;
+
+        if (root.halfmove_clock >= 100)
+            break;
+
+        bool repeated = false;
+        for (int i = 0; i < key_count; ++i) {
+            if (keys[static_cast<std::size_t>(i)] == root.key) {
+                repeated = true;
+                break;
+            }
+        }
+        if (repeated)
+            break;
+
+        keys[static_cast<std::size_t>(key_count++)] = root.key;
+    }
+
+    for (int i = pv_length - 1; i >= 0; --i) {
+        unmake_move(
+            root,
+            made_moves[static_cast<std::size_t>(i)],
+            mem.tables,
+            states[static_cast<std::size_t>(i)]
+        );
+    }
+
+    return pv_length;
+}
+
 [[nodiscard]] bool pv_contains_key(
     const std::array<Key, MAX_PLY + MAX_GAME_HISTORY + 2>& keys,
     int key_count,
@@ -4420,6 +4561,75 @@ struct IterativeWorkerResult {
     for (int i = 0; i < key_count; ++i)
         count += keys[static_cast<std::size_t>(i)] == key;
     return count;
+}
+
+[[nodiscard]] int validate_and_sanitize_pv(
+    const Position& root,
+    memory::Memory& mem,
+    Move* pv,
+    int pv_length,
+    std::ostream* diagnostic_out = nullptr
+) noexcept {
+    // Replay the PV from the root, verifying each move is legal.
+    // On illegal move: diagnostics (if requested), truncate PV, and in debug
+    // builds assert.
+    if (pv_length <= 0)
+        return 0;
+
+    Position pos{};
+    position_copy_without_accumulators(pos, root);
+
+    std::array<StateInfo, MAX_PLY> states{};
+    for (int i = 0; i < pv_length; ++i) {
+        const Move move = pv[i];
+        if (move_is_none(move)) {
+            // Truncate at first null move.
+            return i;
+        }
+
+        // Check legality in the current position.
+        MoveList legal{};
+        generate_legal(pos, mem, legal);
+        bool ok = false;
+        for (int j = 0; j < legal.size; ++j) {
+            if (legal.moves[j] == move) {
+                ok = true;
+                break;
+            }
+        }
+
+        if (!ok) {
+            if (diagnostic_out != nullptr) {
+                *diagnostic_out
+                    << "info string PV_VALIDATE illegal move at index " << i
+                    << " ply " << i
+                    << " move " << move_to_uci(move)
+                    << " pv";
+                for (int k = 0; k < pv_length; ++k)
+                    *diagnostic_out << ' ' << move_to_uci(pv[k]);
+                *diagnostic_out << '\n';
+            }
+#if !defined(NDEBUG)
+            // In debug builds, crash to make the bug visible.
+            assert(false && "Illegal PV move detected");
+#endif
+            return i; // Truncate to the legal prefix.
+        }
+
+        make_move(pos, move, mem.tables, states[static_cast<std::size_t>(i)]);
+    }
+
+    // Unmake all moves to restore position.
+    for (int i = pv_length - 1; i >= 0; --i) {
+        unmake_move(
+            pos,
+            pv[i],
+            mem.tables,
+            states[static_cast<std::size_t>(i)]
+        );
+    }
+
+    return pv_length; // All moves legal.
 }
 
 void extend_syzygy_pv(
@@ -4588,7 +4798,8 @@ void emit_iteration_info(
     const int hashfull = memory::tt_hashfull(local_mem.tt);
 
     stream << "info depth " << depth
-           << " seldepth " << current.seldepth << ' ';
+           << " seldepth " << current.seldepth
+           << " multipv 1 ";
     append_uci_score(
         stream,
         current.score,
@@ -4614,6 +4825,25 @@ void emit_iteration_info(
         emitted_pv_length = 1;
     }
 
+    // Validate PV legality before output.  In debug builds an illegal move
+    // asserts; in release builds the PV is truncated to the legal prefix.
+    Move validated_pv[MAX_PLY]{};
+    if (emitted_pv_length > 0) {
+        std::memcpy(
+            validated_pv,
+            emitted_pv,
+            static_cast<std::size_t>(emitted_pv_length) * sizeof(Move)
+        );
+        emitted_pv_length = validate_and_sanitize_pv(
+            local_root,
+            local_mem,
+            validated_pv,
+            emitted_pv_length,
+            &stream
+        );
+        emitted_pv = validated_pv;
+    }
+
     for (int i = 0; i < emitted_pv_length; ++i)
         stream << ' ' << move_to_uci(emitted_pv[i]);
 
@@ -4632,6 +4862,8 @@ void emit_iteration_info(
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
     searcher.p2_accumulator_stack.reset();
+    searcher.x1_accumulator_stack.reset();
+    searcher.v2_accumulator_stack.reset();
     searcher.root_side_to_move = keyed_root.side_to_move;
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
@@ -4734,6 +4966,34 @@ void emit_iteration_info(
             }
 
             break;
+        }
+
+        if (searcher.limits.full_pv &&
+            !searcher.stopped &&
+            current_score_bound == memory::BOUND_EXACT &&
+            searcher.pv_length[0] <= 1 &&
+            !move_is_none(current.best_move)) {
+            Position tt_pv_root{};
+            position_copy_without_accumulators(tt_pv_root, keyed_root);
+
+            Move rebuilt_pv[MAX_PLY]{};
+            const int rebuilt_length = reconstruct_tt_pv(
+                tt_pv_root,
+                searcher.mem,
+                searcher.limits,
+                current.best_move,
+                rebuilt_pv,
+                std::min(depth, MAX_PLY)
+            );
+            if (rebuilt_length > searcher.pv_length[0] &&
+                rebuilt_pv[0] == current.best_move) {
+                std::memcpy(
+                    searcher.pv_table[0],
+                    rebuilt_pv,
+                    static_cast<std::size_t>(rebuilt_length) * sizeof(Move)
+                );
+                searcher.pv_length[0] = rebuilt_length;
+            }
         }
 
         if (!searcher.stopped && !move_is_none(current.best_move)) {
@@ -5151,10 +5411,28 @@ void emit_iteration_info(
                << " tbhits " << tb_hits
                << " hashfull " << hashfull
                << " time " << time_ms
+               << " multipv 1"
                << " pv";
 
-        for (int i = 0; i < result.pv_length; ++i)
-            stream << ' ' << move_to_uci(result.pv[i]);
+        // Validate PV legality before output.
+        Move validated_pv[MAX_PLY]{};
+        int validated_length = result.pv_length;
+        if (validated_length > 0) {
+            std::memcpy(
+                validated_pv,
+                result.pv,
+                static_cast<std::size_t>(validated_length) * sizeof(Move)
+            );
+            validated_length = validate_and_sanitize_pv(
+                local_root,
+                local_mem,
+                validated_pv,
+                validated_length,
+                &stream
+            );
+        }
+        for (int i = 0; i < validated_length; ++i)
+            stream << ' ' << move_to_uci(validated_pv[i]);
 
         stream << '\n';
     };
@@ -5270,6 +5548,8 @@ void emit_iteration_info(
 
         Searcher recovery_searcher(mem, recovery_limits);
         recovery_searcher.p2_accumulator_stack.reset();
+        recovery_searcher.x1_accumulator_stack.reset();
+        recovery_searcher.v2_accumulator_stack.reset();
         reset_searcher_iteration(
             recovery_searcher,
             timed_search ? search_start : Searcher::clock::now(),
