@@ -29,6 +29,7 @@ SOFTWARE.
 #include <iosfwd>
 #include <string>
 
+#include "HistoryContext.h"
 #include "Memory.h"
 #include "Types.h"
 
@@ -271,6 +272,26 @@ struct SearchLimits {
     int thread_id = 0;                  // 本線程的 ID（0 = 主線程）
     int thread_count = 1;               // 總線程數
     bool report_info = true;            // 是否輸出 UCI info 資訊（輔助線程設為 false）
+};
+
+/*
+ * SearchStackEntry — 每個 ply 的搜尋狀態
+ *
+ * 在搜尋遞歸過程中，每個 ply 都需要保留一些狀態供後續 ply 使用。
+ * 這些狀態透過 search_stack[] 陣列在 ply 之間傳遞。
+ */
+struct SearchStackEntry {
+    Move current_move = 0;
+    ContinuationHistoryContext continuation{};
+    int static_eval = 0;
+    int stat_score = 0;
+    int reduction_fp = 0;
+    int extension = 0;
+    int move_count = 0;
+    int cutoff_count = 0;
+    bool in_check = false;
+    bool tt_hit = false;
+    bool tt_pv = false;
 };
 
 /*

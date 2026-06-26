@@ -24,7 +24,7 @@ SOFTWARE.
 
 #pragma once
 
-#include "SearchStack.h"
+#include "Search.h"
 
 /*
  * LMR (延遲著法減免) — Late Move Reduction
