@@ -2626,6 +2626,7 @@ struct Searcher {
     [[nodiscard]] int qsearch(Position& pos, int alpha, int beta, int ply) noexcept {
         // Quiescence search extends only tactical continuations (or all legal
         // evasions when in check) so the engine does not stand pat in unstable positions.
+        pv_length[ply] = 0;
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
         ++nodes;
@@ -2647,8 +2648,6 @@ struct Searcher {
 
         const int alpha0 = alpha;
         const bool pv_node = (beta - alpha) > 1;
-        if (pv_node)
-            pv_length[ply] = 0;
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
             return repetition_score(pos.side_to_move, tt_raw_eval_from_probe(probe));
@@ -2774,6 +2773,7 @@ struct Searcher {
         // - first move gets a full window
         // - later moves get a null window first
         // - promising moves are re-searched on a wider window
+        pv_length[ply] = 0;
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
 
@@ -2802,8 +2802,6 @@ struct Searcher {
 
         const int alpha0 = alpha;
         const bool pv_node = (beta - alpha) > 1;
-        if (pv_node)
-            pv_length[ply] = 0;
         const bool exclusion_search = !move_is_none(excluded_move);
         const memory::TTProbe probe = memory::tt_probe(mem.tt, pos.key);
         if (is_repetition_draw(pos, ply))
@@ -4565,6 +4563,75 @@ struct IterativeWorkerResult {
     return count;
 }
 
+[[nodiscard]] int validate_and_sanitize_pv(
+    const Position& root,
+    memory::Memory& mem,
+    Move* pv,
+    int pv_length,
+    std::ostream* diagnostic_out = nullptr
+) noexcept {
+    // Replay the PV from the root, verifying each move is legal.
+    // On illegal move: diagnostics (if requested), truncate PV, and in debug
+    // builds assert.
+    if (pv_length <= 0)
+        return 0;
+
+    Position pos{};
+    position_copy_without_accumulators(pos, root);
+
+    std::array<StateInfo, MAX_PLY> states{};
+    for (int i = 0; i < pv_length; ++i) {
+        const Move move = pv[i];
+        if (move_is_none(move)) {
+            // Truncate at first null move.
+            return i;
+        }
+
+        // Check legality in the current position.
+        MoveList legal{};
+        generate_legal(pos, mem, legal);
+        bool ok = false;
+        for (int j = 0; j < legal.size; ++j) {
+            if (legal.moves[j] == move) {
+                ok = true;
+                break;
+            }
+        }
+
+        if (!ok) {
+            if (diagnostic_out != nullptr) {
+                *diagnostic_out
+                    << "info string PV_VALIDATE illegal move at index " << i
+                    << " ply " << i
+                    << " move " << move_to_uci(move)
+                    << " pv";
+                for (int k = 0; k < pv_length; ++k)
+                    *diagnostic_out << ' ' << move_to_uci(pv[k]);
+                *diagnostic_out << '\n';
+            }
+#if !defined(NDEBUG)
+            // In debug builds, crash to make the bug visible.
+            assert(false && "Illegal PV move detected");
+#endif
+            return i; // Truncate to the legal prefix.
+        }
+
+        make_move(pos, move, mem.tables, states[static_cast<std::size_t>(i)]);
+    }
+
+    // Unmake all moves to restore position.
+    for (int i = pv_length - 1; i >= 0; --i) {
+        unmake_move(
+            pos,
+            pv[i],
+            mem.tables,
+            states[static_cast<std::size_t>(i)]
+        );
+    }
+
+    return pv_length; // All moves legal.
+}
+
 void extend_syzygy_pv(
     const Position& root,
     const memory::Memory& mem,
@@ -4756,6 +4823,25 @@ void emit_iteration_info(
         fallback_pv[0] = current.best_move;
         emitted_pv = fallback_pv;
         emitted_pv_length = 1;
+    }
+
+    // Validate PV legality before output.  In debug builds an illegal move
+    // asserts; in release builds the PV is truncated to the legal prefix.
+    Move validated_pv[MAX_PLY]{};
+    if (emitted_pv_length > 0) {
+        std::memcpy(
+            validated_pv,
+            emitted_pv,
+            static_cast<std::size_t>(emitted_pv_length) * sizeof(Move)
+        );
+        emitted_pv_length = validate_and_sanitize_pv(
+            local_root,
+            local_mem,
+            validated_pv,
+            emitted_pv_length,
+            &stream
+        );
+        emitted_pv = validated_pv;
     }
 
     for (int i = 0; i < emitted_pv_length; ++i)
@@ -5328,8 +5414,25 @@ void emit_iteration_info(
                << " multipv 1"
                << " pv";
 
-        for (int i = 0; i < result.pv_length; ++i)
-            stream << ' ' << move_to_uci(result.pv[i]);
+        // Validate PV legality before output.
+        Move validated_pv[MAX_PLY]{};
+        int validated_length = result.pv_length;
+        if (validated_length > 0) {
+            std::memcpy(
+                validated_pv,
+                result.pv,
+                static_cast<std::size_t>(validated_length) * sizeof(Move)
+            );
+            validated_length = validate_and_sanitize_pv(
+                local_root,
+                local_mem,
+                validated_pv,
+                validated_length,
+                &stream
+            );
+        }
+        for (int i = 0; i < validated_length; ++i)
+            stream << ' ' << move_to_uci(validated_pv[i]);
 
         stream << '\n';
     };
