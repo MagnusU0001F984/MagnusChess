@@ -1636,7 +1636,7 @@ bool load_p2_embedded() {
 
     std::istream stream(&buf);
     const bool ok = load_network_from_stream(
-        stream, g_p2, "mm-b421bfeb0.MNUE",
+        stream, g_p2, kEmbeddedP2Filename,
         static_cast<std::uintmax_t>(size)
     );
     if (ok)

@@ -37,6 +37,6 @@ SOFTWARE.
     .balign 64
 
 mnue_p2_embedded_data:
-    .incbin "build/mm-b421bfeb0.MNUE"
+    .incbin MNUE_EMBEDDED_PATH
 
 mnue_p2_embedded_end:

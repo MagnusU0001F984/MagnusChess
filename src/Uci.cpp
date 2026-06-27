@@ -1358,15 +1358,12 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 4.5.127 by the Magnus developer ";
-        if (is_beta) {
-            out << "& This is a beta version";
-        }
+        out << "MagnusChess 4.5.132 by the T. Magnus";
         out << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess4.5.127";
+        out << "id name MagnusChess4.5.132";
         
         if(is_beta) {
             out << "-dev";
@@ -1374,7 +1371,7 @@ struct UciSession {
         
         out << '\n';
 
-        out << "id author Magnus(gitvalerain@gmail.com)\n";
+        out << "id author T. Magnus\n";
         out << "option name Hash type spin default " << DEFAULT_UCI_HASH_MB
             << " min 1 max 1048576\n";
         out << "option name Threads type spin default 1 min 1 max " << MAX_UCI_THREADS << "\n";
@@ -1405,7 +1402,7 @@ struct UciSession {
             << syzygy::DEFAULT_PROBE_LIMIT
             << " min " << syzygy::MIN_PROBE_LIMIT
             << " max " << syzygy::MAX_PROBE_LIMIT << "\n";
-        out << "option name MNUEfile type string default mm-b421bfeb0.MNUE\n";
+        out << "option name MNUEfile type string default " << mnue::kEmbeddedP2Filename << "\n";
         out << "uciok" << std::endl;
     }
 
@@ -1496,7 +1493,7 @@ struct UciSession {
         }
 
         // Default: compile-time embedded P2 network.
-        if (mnue::p2_loaded() && mnue::p2_path() == "mm-b421bfeb0.MNUE")
+        if (mnue::p2_loaded() && mnue::p2_path() == mnue::kEmbeddedP2Filename)
             return true;
 
         if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {

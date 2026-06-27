@@ -72,6 +72,13 @@ struct P4Layout {
 static_assert(P2Layout::InputSize == 10240);
 static_assert(P4Layout::InputSize == 20480);
 
+// Embedded P2 network filename — driven by Makefile -D, with a fallback
+// for builds that do not go through the Makefile.
+#ifndef MNUE_EMBEDDED_FILENAME
+#define MNUE_EMBEDDED_FILENAME "mm-8adbe41d1.MNUE"
+#endif
+inline constexpr const char* kEmbeddedP2Filename = MNUE_EMBEDDED_FILENAME;
+
 class P2AccumulatorStack {
 public:
     P2AccumulatorStack() noexcept;
