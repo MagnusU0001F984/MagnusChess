@@ -35,6 +35,10 @@ ifneq ($(MNUEV2_TELEMETRY),0)
   endif
 endif
 
+# Embedded P2 network — single source of truth for the filename.
+# Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
+MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
+
 OBJ_VARIANT ?= normal
 OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)/$(OBJ_VARIANT)
 PGO_DIR := $(BUILD_DIR)/pgo/$(EFFECTIVE_PROFILE)
@@ -152,7 +156,8 @@ WARN_FLAGS := \
 	-Wno-sign-conversion
 
 CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) \
-	-DMAGNUS_MNUEV2_TELEMETRY=$(MNUEV2_TELEMETRY)
+	-DMAGNUS_MNUEV2_TELEMETRY=$(MNUEV2_TELEMETRY) \
+	-DMNUE_EMBEDDED_FILENAME='"$(MNUE_EMBEDDED_FILE)"'
 
 BASE_CXXFLAGS := \
 	-std=c++20 \
@@ -311,12 +316,13 @@ $(FATHOM_OBJ): \
 # The incbin source is a raw 21 MB MNUE file.  We compile it as a standalone
 # assembly object so that -fprofile-generate, -flto, and whole-program analysis
 # never touch this blob.
-$(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/mm-b421bfeb0.MNUE | $(OBJ_DIR)/mnue
+$(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/$(MNUE_EMBEDDED_FILE) | $(OBJ_DIR)/mnue
 	$(CC) -x assembler-with-cpp -std=gnu99 -m64 -O2 \
+		-DMNUE_EMBEDDED_PATH='"build/$(MNUE_EMBEDDED_FILE)"' \
 		-I. \
 		-c $< -o $@
 
-$(OBJ_DIR)/mnue/Mnue.o: build/mm-b421bfeb0.MNUE
+$(OBJ_DIR)/mnue/Mnue.o: build/$(MNUE_EMBEDDED_FILE)
 
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)
