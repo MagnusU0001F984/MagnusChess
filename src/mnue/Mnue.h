@@ -55,6 +55,20 @@ struct P2Layout {
     static constexpr int ArchId = 2;
 };
 
+// MNUE-P2Pro: wider P2-compatible fast filter net.
+//   1 x 32 x 16 x 1408 x 10240
+//   output_buckets x input_buckets x hidden x input_features.
+struct P2ProLayout {
+    static constexpr int InputBuckets = 16;
+    static constexpr int OutputBuckets = 32;
+    static constexpr int RelativeColors = 2;
+    static constexpr int NonKingPieceTypes = 5;
+    static constexpr int Squares = 64;
+    static constexpr int InputSize = InputBuckets * RelativeColors * NonKingPieceTypes * Squares;
+    static constexpr int HiddenSize = 1408;
+    static constexpr int ArchId = 2;
+};
+
 // MNUE-P4: precision refine net.
 //   1 x 32 x 32 x 5120 x 20480
 //   output_buckets x input_buckets x hidden x input_features.
@@ -70,9 +84,10 @@ struct P4Layout {
 };
 
 static_assert(P2Layout::InputSize == 10240);
+static_assert(P2ProLayout::InputSize == 10240);
 static_assert(P4Layout::InputSize == 20480);
 
-// Embedded P2 network filename — driven by Makefile -D, with a fallback
+// Embedded P2/P2Pro network filename - driven by Makefile -D, with a fallback
 // for builds that do not go through the Makefile.
 #ifndef MNUE_EMBEDDED_FILENAME
 #define MNUE_EMBEDDED_FILENAME "mm-8adbe41d1.MNUE"
@@ -122,6 +137,14 @@ void unload_all() noexcept;
 [[nodiscard]] const std::string& p4_path() noexcept;
 [[nodiscard]] const std::string& last_error() noexcept;
 [[nodiscard]] const char* eval_simd_name() noexcept;
+[[nodiscard]] const char* p2_eval_name() noexcept;
+[[nodiscard]] const char* p2_arch_name() noexcept;
+[[nodiscard]] const char* p2_short_name() noexcept;
+[[nodiscard]] int p2_input_size() noexcept;
+[[nodiscard]] int p2_hidden_size() noexcept;
+[[nodiscard]] int p2_input_buckets() noexcept;
+[[nodiscard]] int p2_output_buckets() noexcept;
+[[nodiscard]] std::size_t p2_file_bytes() noexcept;
 
 // P2 is the base evaluator. P4 is intentionally lazy and should only be used
 // from selected search nodes; it is not written into TT raw eval in the first

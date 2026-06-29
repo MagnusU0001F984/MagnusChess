@@ -48,6 +48,7 @@ SOFTWARE.
 #include "Nnue.h"
 #include "mnue/Mnue.h"
 #include "mnue/MnueX1Network.h"
+#include "mnue/MnueX2Network.h"
 #include "mnue/MnueV2Network.h"
 #include "mnue/MnueV2Telemetry.h"
 #include "See.h"
@@ -232,7 +233,8 @@ constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
 enum class ScoreModel {
     Hce,
     Nnue,
-    Mnue
+    Mnue,
+    MnueX2
 };
 
 struct RootLine {
@@ -377,6 +379,8 @@ inline void append_uci_score(
     int display_score = score;
     if (score_model == ScoreModel::Mnue)
         display_score = mnue::search_score_to_cp(score, root);
+    else if (score_model == ScoreModel::MnueX2)
+        display_score = mnue::x2::search_score_to_cp(score, root);
     else if (score_model == ScoreModel::Nnue)
         display_score = nnue::search_score_to_cp(score, root);
     out << "score cp " << display_score;
@@ -384,6 +388,10 @@ inline void append_uci_score(
 
     if (score_model == ScoreModel::Mnue) {
         const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
+        out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
+    } else if (score_model == ScoreModel::MnueX2) {
+        const nnue::WdlTriplet wdl =
+            mnue::x2::search_score_to_wdl(score, root);
         out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
     } else if (score_model == ScoreModel::Nnue) {
         const nnue::WdlTriplet wdl = nnue::search_score_to_wdl(score, root);
@@ -2013,6 +2021,7 @@ struct Searcher {
         return limits.use_nnue
             && (
                 mnue::x1::loaded()
+                || mnue::x2::loaded()
                 || mnue::v2::loaded()
                 || mnue::p2_loaded()
             );
@@ -2020,6 +2029,10 @@ struct Searcher {
 
     [[nodiscard]] inline bool use_mnue_x1() const noexcept {
         return limits.use_nnue && mnue::x1::loaded();
+    }
+
+    [[nodiscard]] inline bool use_mnue_x2() const noexcept {
+        return limits.use_nnue && mnue::x2::loaded();
     }
 
     [[nodiscard]] inline bool use_mnue_v2() const noexcept {
@@ -2033,6 +2046,9 @@ struct Searcher {
     ) noexcept {
         if (use_mnue_x1())
             x1_accumulator_stack.push();
+        else if (use_mnue_x2()) {
+            // X2 currently uses full-rebuild evaluation.
+        }
         else if (use_mnue_v2())
             v2_accumulator_stack.push(pos, mem, move);
         else if (use_mnue())
@@ -2050,6 +2066,9 @@ struct Searcher {
         unmake_move(pos, move, mem.tables, st);
         if (use_mnue_x1())
             x1_accumulator_stack.pop();
+        else if (use_mnue_x2()) {
+            // X2 currently uses full-rebuild evaluation.
+        }
         else if (use_mnue_v2())
             v2_accumulator_stack.pop(pos, mem);
         else if (use_mnue())
@@ -2064,6 +2083,8 @@ struct Searcher {
                 x1_accumulator_stack
             );
         }
+        if (use_mnue_x2())
+            return mnue::x2::evaluate_reference(pos, mem);
         if (use_mnue_v2()) {
             return mnue::v2::evaluate_incremental(
                 pos,
@@ -5229,9 +5250,11 @@ void emit_iteration_info(
         stream,
         current.score,
         local_root,
-        searcher.use_mnue()
-            ? ScoreModel::Mnue
-            : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce),
+        searcher.use_mnue_x2()
+            ? ScoreModel::MnueX2
+            : (searcher.use_mnue()
+                ? ScoreModel::Mnue
+                : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce)),
         score_bound
     );
     stream << " nodes " << nodes

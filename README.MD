@@ -21,8 +21,8 @@ reproducible testing, and a conventional high-performance search architecture.
   testing.
 - Classical alpha-beta search core with iterative deepening, transposition
   table support, move ordering, pruning, reductions, and quiescence search.
-- Neural evaluation support through MNUE files, including an embedded default
-  MNUE P2 network in the standard build.
+- Neural evaluation support through MNUE files, including P2/P2Pro-compatible
+  loading and an embedded default MNUE P2 network in the standard build.
 - Optional Syzygy tablebase probing through the vendored Fathom backend.
 - Built-in validation and benchmark commands for perft, divide, search bench,
   evaluation bench, and transposition-table bench.
@@ -86,14 +86,15 @@ opponent, anchor, or direct predecessor test under the stated conditions.
 ### Evaluation
 
 - Hand-crafted evaluation fallback with tapered middle-game and end-game terms.
-- MNUE P2 evaluation with a standard embedded network in the build.
+- MNUE P2/P2Pro evaluation with a standard embedded P2 network in the build.
 - MNUE X1 and MNUEv2 development loaders and diagnostics.
 - Legacy NNUE fallback path where supported by the build.
 - If no neural evaluator is available, search falls back to HCE.
 
 ## MNUE Networks
 
-The standard build embeds the MNUE P2 file named in `src/Makefile`:
+The standard build embeds the MNUE P2/P2Pro-family file named in `src/Makefile`;
+the current default is the legacy P2 net:
 
 ```text
 MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
@@ -102,11 +103,25 @@ MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
 The build expects this file to exist under `src/build/` so it can be included
 through `src/mnue/MnueEmbedded.S`.
 
+To convert a Bullet P2Pro `quantised.bin` checkpoint into a headered `.MNUE`
+file, run:
+
+```text
+python tools/sync_p2pro_mnue.py path/to/checkpoint/quantised.bin
+```
+
+This writes `src/build/<checkpoint-directory>.MNUE` and keeps the embedded
+default as P2. Add `--set-embedded` only when that P2Pro file should become the
+compile-time default.
+
 An external MNUE file can be selected through UCI:
 
 ```text
 setoption name MNUEfile value path/to/network.MNUE
 ```
+
+Both legacy P2 (`hidden=1024`) and P2Pro (`hidden=1408`) files are accepted.
+Headerless Bullet `quantised.bin` payloads are detected by exact raw size.
 
 Use the embedded network again with:
 
@@ -350,7 +365,7 @@ perft
 divide
 mnuedebug
 mnuecheck
-mnueloadp2 <path-to-p2.mnue>
+mnueloadp2 <path-to-p2-or-p2pro.mnue-or-quantised.bin>
 mnuev2load <path-to-v2.mnue>
 mnuev2info
 mnuev2debug

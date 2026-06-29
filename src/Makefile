@@ -35,7 +35,7 @@ ifneq ($(MNUEV2_TELEMETRY),0)
   endif
 endif
 
-# Embedded P2 network — single source of truth for the filename.
+# Embedded P2/P2Pro network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
 MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
 
@@ -69,6 +69,7 @@ SRC := \
 	mnue/Mnue.cpp \
 	mnue/MnueX1Features.cpp \
 	mnue/MnueX1Network.cpp \
+	mnue/MnueX2Network.cpp \
 	mnue/MnueV2Features.cpp \
 	mnue/MnueV2Network.cpp \
 	mnue/MnueV2Telemetry.cpp
@@ -76,8 +77,8 @@ SRC := \
 FATHOM_DIR := ../third_party/fathom
 FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
 
-# Embedded network object — compiled separately without LTO / PGO to keep
-# the 21 MB incbin isolated from instrumentation and whole-program analysis.
+# Embedded network object - compiled separately without LTO / PGO to keep
+# the 20.1 MiB incbin isolated from instrumentation and whole-program analysis.
 MNUE_EMBEDDED_OBJ := $(OBJ_DIR)/mnue/MnueEmbedded.o
 
 OBJ := $(patsubst %.cpp,$(OBJ_DIR)/%.o,$(SRC)) $(FATHOM_OBJ) $(MNUE_EMBEDDED_OBJ)
@@ -312,17 +313,19 @@ $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/stdendian.h | $(OBJ_DIR)
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
 
-# === Embedded network (separate .S — no LTO, no PGO) ===
-# The incbin source is a raw 21 MB MNUE file.  We compile it as a standalone
+# === Embedded network (separate .S - no LTO, no PGO) ===
+# The incbin source is a raw 20.1 MiB MNUE file. We compile it as a standalone
 # assembly object so that -fprofile-generate, -flto, and whole-program analysis
 # never touch this blob.
-$(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/$(MNUE_EMBEDDED_FILE) | $(OBJ_DIR)/mnue
+$(MNUE_EMBEDDED_OBJ): mnue/MnueEmbedded.S build/$(MNUE_EMBEDDED_FILE) Makefile | $(OBJ_DIR)/mnue
 	$(CC) -x assembler-with-cpp -std=gnu99 -m64 -O2 \
 		-DMNUE_EMBEDDED_PATH='"build/$(MNUE_EMBEDDED_FILE)"' \
 		-I. \
 		-c $< -o $@
 
-$(OBJ_DIR)/mnue/Mnue.o: build/$(MNUE_EMBEDDED_FILE)
+$(OBJ_DIR)/mnue/Mnue.o: build/$(MNUE_EMBEDDED_FILE) Makefile
+
+$(OBJ_DIR)/Uci.o: Makefile
 
 $(OBJ_DIR):
 	$(call MKDIR_P,$@)

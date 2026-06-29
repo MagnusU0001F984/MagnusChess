@@ -239,7 +239,8 @@ struct TTBenchProbeResult {
 
         if (mnue::load_p2(eval_file)) {
             if (out)
-                *out << "info string loaded mnue p2 " << eval_file << '\n';
+                *out << "info string loaded " << mnue::p2_eval_name()
+                     << ' ' << eval_file << '\n';
             return true;
         }
 
@@ -248,10 +249,10 @@ struct TTBenchProbeResult {
         return false;
     }
 
-    // Default: compile-time embedded P2 network.
+    // Default: compile-time embedded P2/P2Pro network.
     if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
         if (out)
-            *out << "info string loaded embedded mnue p2\n";
+            *out << "info string loaded embedded " << mnue::p2_eval_name() << '\n';
         return true;
     }
 

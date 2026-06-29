@@ -51,6 +51,7 @@ SOFTWARE.
 #include "mnue/Mnue.h"
 #include "mnue/MnueX1Features.h"
 #include "mnue/MnueX1Network.h"
+#include "mnue/MnueX2Network.h"
 #include "mnue/MnueV2Features.h"
 #include "mnue/MnueV2Network.h"
 #include "mnue/MnueV2Telemetry.h"
@@ -463,7 +464,8 @@ void display_position(const Position& pos, std::ostream& out) {
 enum class DisplayScoreModel {
     Hce,
     Nnue,
-    Mnue
+    Mnue,
+    MnueX2
 };
 
 [[nodiscard]] std::string display_score_text(
@@ -486,6 +488,8 @@ enum class DisplayScoreModel {
     int cp = score;
     if (score_model == DisplayScoreModel::Mnue)
         cp = mnue::search_score_to_cp(score, root);
+    else if (score_model == DisplayScoreModel::MnueX2)
+        cp = mnue::x2::search_score_to_cp(score, root);
     else if (score_model == DisplayScoreModel::Nnue)
         cp = nnue::search_score_to_cp(score, root);
     return "cp " + std::to_string(cp);
@@ -717,10 +721,12 @@ enum class DisplayScoreModel {
         return "hce";
     if (mnue::x1::loaded())
         return "mnue-x1";
+    if (mnue::x2::loaded())
+        return "mnue-x2";
     if (mnue::v2::loaded())
         return "mnue-v2";
     if (mnue::p2_loaded())
-        return "mnue-p2";
+        return mnue::p2_eval_name();
     if (nnue::loaded())
         return "nnue";
     return "hce";
@@ -1295,6 +1301,7 @@ struct UciSession {
         return use_nnue
             && (
                 mnue::x1::loaded()
+                || mnue::x2::loaded()
                 || mnue::v2::loaded()
                 || mnue::p2_loaded()
             );
@@ -1303,6 +1310,8 @@ struct UciSession {
     [[nodiscard]] std::string mnue_name() const {
         if (mnue::x1::loaded())
             return mnue::x1::path();
+        if (mnue::x2::loaded())
+            return mnue::x2::path();
         if (mnue::v2::loaded())
             return mnue::v2::path();
         return mnue::p2_loaded() ? mnue::p2_path() : std::string{};
@@ -1360,12 +1369,12 @@ struct UciSession {
     const bool is_beta = true;
 
     void emit_banner(std::ostream& out) const {
-        out << "MagnusChess 5.6.132 by the Theodore Magnus Øen Nidhar";
+        out << "MagnusChess 5.6.142 by the Theodore Magnus Øen Nidhar";
         out << std::endl;
     }
 
     void emit_uci_id(std::ostream& out) const {
-        out << "id name MagnusChess5.6.132";
+        out << "id name MagnusChess5.6.142";
         
         if(is_beta) {
             out << "-dev";
@@ -1457,6 +1466,10 @@ struct UciSession {
 
 
     [[nodiscard]] bool ensure_mnue_loaded(std::ostream* out) {
+        // If x2 was loaded manually via mnuex2load, keep it.
+        if (mnue::x2::loaded())
+            return true;
+
         // If v2 was loaded manually via mnuev2load, keep it.
         if (mnue::v2::loaded())
             return true;
@@ -1475,6 +1488,7 @@ struct UciSession {
                             << mnue::v2::last_error() << '\n';
                     return false;
                 }
+                mnue::x2::unload();
                 mnue::unload_p2();
                 if (out)
                     mnue::v2::debug_dump_network(*out);
@@ -1482,9 +1496,11 @@ struct UciSession {
             }
 
             if (mnue::load_p2(p2_resolved)) {
+                mnue::x2::unload();
                 mnue::v2::unload();
                 if (out)
-                    *out << "info string loaded mnue " << p2_resolved << '\n';
+                    *out << "info string loaded " << mnue::p2_eval_name()
+                         << ' ' << p2_resolved << '\n';
                 return true;
             }
 
@@ -1494,13 +1510,14 @@ struct UciSession {
             return false;
         }
 
-        // Default: compile-time embedded P2 network.
+        // Default: compile-time embedded P2/P2Pro network.
         if (mnue::p2_loaded() && mnue::p2_path() == mnue::kEmbeddedP2Filename)
             return true;
 
         if (mnue::p2_embedded_available() && mnue::load_p2_embedded()) {
+            mnue::x2::unload();
             if (out)
-                *out << "info string loaded embedded mnue p2\n";
+                *out << "info string loaded embedded " << mnue::p2_eval_name() << '\n';
             return true;
         }
 
@@ -1655,6 +1672,7 @@ struct UciSession {
             // "<embedded>" or empty → revert to built-in network.
             if (value.empty() || value == "<embedded>") {
                 eval_file_p2.clear();
+                mnue::x2::unload();
                 mnue::v2::unload();
                 mnue::unload_p2();
                 memory::memory_clear_hash(mem);
@@ -1669,6 +1687,7 @@ struct UciSession {
                 return;
             }
             eval_file_p2 = resolved;
+            mnue::x2::unload();
             memory::memory_clear_hash(mem);
 
             if (use_nnue && !ensure_eval_loaded(&out))
@@ -1700,15 +1719,16 @@ struct UciSession {
             const int search_cp_stm = mnue::search_score_to_cp(search_stm, pos);
             const mnue::WdlTriplet wdl_white =
                 white_pov_wdl(pos, mnue::search_score_to_wdl(search_stm, pos));
+            const char* p2_name = mnue::p2_short_name();
 
-            out << "info string mnue p2 path " << mnue::p2_path() << '\n';
-            out << "info string mnue p2 material " << mnue::material_units(pos) << '\n';
-            out << "info string mnue p2 raw " << white_pov_score(pos, raw_stm) << '\n';
-            out << "info string mnue p2 search " << white_pov_score(pos, search_stm) << '\n';
-            out << "info string mnue p2 searchcp " << white_pov_score(pos, search_cp_stm) << '\n';
-            out << "info string mnue p2 winrate "
+            out << "info string mnue " << p2_name << " path " << mnue::p2_path() << '\n';
+            out << "info string mnue " << p2_name << " material " << mnue::material_units(pos) << '\n';
+            out << "info string mnue " << p2_name << " raw " << white_pov_score(pos, raw_stm) << '\n';
+            out << "info string mnue " << p2_name << " search " << white_pov_score(pos, search_stm) << '\n';
+            out << "info string mnue " << p2_name << " searchcp " << white_pov_score(pos, search_cp_stm) << '\n';
+            out << "info string mnue " << p2_name << " winrate "
                 << wdl_white.win << '\n';
-            out << "info string mnue p2 wdl "
+            out << "info string mnue " << p2_name << " wdl "
                 << wdl_white.win << ' '
                 << wdl_white.draw << ' '
                 << wdl_white.loss << '\n';
@@ -1739,6 +1759,29 @@ struct UciSession {
             out << "info string mnue v2 searchcp "
                 << white_pov_score(pos, search_cp_stm) << '\n';
             out << "info string mnue v2 wdl "
+                << wdl_white.win << ' '
+                << wdl_white.draw << ' '
+                << wdl_white.loss << '\n';
+        }
+
+        if (mnue::x2::loaded()) {
+            const int raw_stm = mnue::x2::evaluate_reference(pos, mem);
+            const int search_stm = mnue::x2::search_score(raw_stm, pos);
+            const int search_cp_stm =
+                mnue::x2::search_score_to_cp(search_stm, pos);
+            const nnue::WdlTriplet wdl_white = white_pov_wdl(
+                pos,
+                mnue::x2::search_score_to_wdl(search_stm, pos)
+            );
+            out << "info string mnue x2 path "
+                << mnue::x2::path() << '\n';
+            out << "info string mnue x2 raw "
+                << white_pov_score(pos, raw_stm) << '\n';
+            out << "info string mnue x2 search "
+                << white_pov_score(pos, search_stm) << '\n';
+            out << "info string mnue x2 searchcp "
+                << white_pov_score(pos, search_cp_stm) << '\n';
+            out << "info string mnue x2 wdl "
                 << wdl_white.win << ' '
                 << wdl_white.draw << ' '
                 << wdl_white.loss << '\n';
@@ -1831,9 +1874,13 @@ struct UciSession {
 
         ensure_search_eval_ready(out, "info string nnue unavailable, sort will use hce");
         const DisplayScoreModel score_model =
-            mnue_active()
-                ? DisplayScoreModel::Mnue
-                : (use_nnue && nnue::loaded() ? DisplayScoreModel::Nnue : DisplayScoreModel::Hce);
+            mnue::x2::loaded()
+                ? DisplayScoreModel::MnueX2
+                : (mnue_active()
+                    ? DisplayScoreModel::Mnue
+                    : (use_nnue && nnue::loaded()
+                        ? DisplayScoreModel::Nnue
+                        : DisplayScoreModel::Hce));
 
         struct SortEntry {
             Move move = 0;
@@ -2069,11 +2116,22 @@ struct UciSession {
         if (mnue_active()) {
             if (mnue::v2::loaded()) {
                 mnue::v2::debug_dump_network(std::cout);
+            } else if (mnue::x2::loaded()) {
+                mnue::x2::debug_dump_network(std::cout);
             } else {
-                std::cout << "info string MNUE evaluation using "
+                std::ostringstream desc;
+                desc << "info string MNUE evaluation using "
                     << mnue_name()
-                    << " (20.1 MB, (1,32,16,1024,10240), "
+                    << " (" << mnue::p2_arch_name()
+                    << ", " << std::fixed << std::setprecision(1)
+                    << (static_cast<double>(mnue::p2_file_bytes()) / (1024.0 * 1024.0))
+                    << " MiB, (1,"
+                    << mnue::p2_output_buckets() << ','
+                    << mnue::p2_input_buckets() << ','
+                    << mnue::p2_hidden_size() << ','
+                    << mnue::p2_input_size() << "), "
                     << mnue::eval_simd_name() << ")\n";
+                std::cout << desc.str();
             }
         }
 
@@ -2202,15 +2260,18 @@ struct UciSession {
         if (command_starts_with(line, "mnueloadp2")) {
             const std::string path{arrow_arguments(command_arguments(line, "mnueloadp2"))};
             if (path.empty()) {
-                out << "info string usage: mnueloadp2 <path-to-p2.mnue>\n";
+                out << "info string usage: mnueloadp2 <path-to-p2-or-p2pro.mnue-or-quantised.bin>\n";
                 return true;
             }
 
             const std::string resolved = resolve_file_path(path);
             if (mnue::load_p2(resolved)) {
+                mnue::x2::unload();
                 mnue::v2::unload();
+                eval_file_p2 = resolved;
                 memory::memory_clear_hash(mem);
-                out << "info string loaded mnue p2 " << resolved << '\n';
+                out << "info string loaded " << mnue::p2_eval_name()
+                    << ' ' << resolved << '\n';
             } else {
                 out << "info string failed to load mnue p2: " << mnue::last_error() << '\n';
             }
@@ -2265,6 +2326,7 @@ struct UciSession {
             }
             const std::string resolved = resolve_file_path(path);
             if (mnue::v2::load(resolved)) {
+                mnue::x2::unload();
                 mnue::unload_p2();
                 eval_file_p2 = resolved;
                 memory::memory_clear_hash(mem);
@@ -2703,6 +2765,41 @@ struct UciSession {
             return true;
         }
 
+        if (command_starts_with(line, "mnuex2load")) {
+            const std::string path{
+                arrow_arguments(command_arguments(line, "mnuex2load"))
+            };
+            if (path.empty()) {
+                out << "info string usage: mnuex2load <path-to-x2.mnue-or-quantised.bin>\n";
+                return true;
+            }
+
+            const std::string resolved = resolve_file_path(path);
+            if (mnue::x2::load(resolved)) {
+                mnue::x1::unload();
+                mnue::v2::unload();
+                mnue::unload_p2();
+                memory::memory_clear_hash(mem);
+                out << "info string loaded mnue x2 " << resolved << '\n';
+                mnue::x2::debug_dump_network(out);
+            } else {
+                out << "info string failed to load mnue x2: "
+                    << mnue::x2::last_error() << '\n';
+            }
+            return true;
+        }
+
+        if (line == "mnuex2unload") {
+            mnue::x2::unload();
+            out << "info string unloaded mnue x2\n";
+            return true;
+        }
+
+        if (line == "mnuex2info") {
+            mnue::x2::debug_dump_network(out);
+            return true;
+        }
+
         if (mnue::x1::loaded()) {
             mnue::x1::AccumulatorStack stack{};
             const int raw_stm =
@@ -2732,6 +2829,10 @@ struct UciSession {
 
             const std::string resolved = resolve_file_path(path);
             if (mnue::x1::load(resolved)) {
+                mnue::x2::unload();
+                mnue::v2::unload();
+                mnue::unload_p2();
+                memory::memory_clear_hash(mem);
                 out << "info string loaded mnue x1 " << resolved << '\n';
             } else {
                 out << "info string failed to load mnue x1: "

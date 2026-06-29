@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 /*
- * Embedded MNUE P2 network — compiled as a standalone object to avoid any
+ * Embedded MNUE P2/P2Pro network — compiled as a standalone object to avoid any
  * interaction with LTO / PGO instrumentation on the C++ translation units.
  *
  * Provides two global symbols:
