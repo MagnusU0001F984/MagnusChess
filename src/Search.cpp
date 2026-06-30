@@ -36,7 +36,6 @@ SOFTWARE.
 #include <thread>
 #include <vector>
 
-#include "Evaluation.h"
 #include "History.h"
 #include "Lmr.h"
 #include "MovePicker.h"
@@ -45,12 +44,7 @@ SOFTWARE.
 
 #include "board/Position.h"
 #include "Nmp.h"
-#include "Nnue.h"
 #include "mnue/Mnue.h"
-#include "mnue/MnueX1Network.h"
-#include "mnue/MnueX2Network.h"
-#include "mnue/MnueV2Network.h"
-#include "mnue/MnueV2Telemetry.h"
 #include "See.h"
 #include "syzygy/Syzygy.h"
 
@@ -230,13 +224,6 @@ constexpr SeeScalePreset SEE_TERM_PRESET = SeeScalePreset::Strong;
 #define MAGNUS_MOVEPICKER_OBS 0
 #endif
 
-enum class ScoreModel {
-    Hce,
-    Nnue,
-    Mnue,
-    MnueX2
-};
-
 struct RootLine {
     Move move = 0;
     int score = -VALUE_INF;
@@ -346,7 +333,6 @@ inline void append_uci_score(
     std::ostream& out,
     int score,
     const Position& root,
-    ScoreModel score_model,
     memory::Bound bound
 ) {
     if (score >= VALUE_MATE - MAX_PLY) {
@@ -376,27 +362,12 @@ inline void append_uci_score(
         return;
     }
 
-    int display_score = score;
-    if (score_model == ScoreModel::Mnue)
-        display_score = mnue::search_score_to_cp(score, root);
-    else if (score_model == ScoreModel::MnueX2)
-        display_score = mnue::x2::search_score_to_cp(score, root);
-    else if (score_model == ScoreModel::Nnue)
-        display_score = nnue::search_score_to_cp(score, root);
+    const int display_score = mnue::search_score_to_cp(score, root);
     out << "score cp " << display_score;
     append_uci_score_bound(out, bound);
 
-    if (score_model == ScoreModel::Mnue) {
-        const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
-        out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
-    } else if (score_model == ScoreModel::MnueX2) {
-        const nnue::WdlTriplet wdl =
-            mnue::x2::search_score_to_wdl(score, root);
-        out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
-    } else if (score_model == ScoreModel::Nnue) {
-        const nnue::WdlTriplet wdl = nnue::search_score_to_wdl(score, root);
-        out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
-    }
+    const mnue::WdlTriplet wdl = mnue::search_score_to_wdl(score, root);
+    out << " wdl " << wdl.win << ' ' << wdl.draw << ' ' << wdl.loss;
 }
 
 [[nodiscard]] inline bool root_msv_enabled(
@@ -723,8 +694,6 @@ struct Searcher {
     int root_side_to_move = WHITE;
     HistoryTables history_tables{};
     mutable mnue::P2AccumulatorStack p2_accumulator_stack{};
-    mutable mnue::x1::AccumulatorStack x1_accumulator_stack{};
-    mutable mnue::v2::AccumulatorStack v2_accumulator_stack{};
     Move pv_table[MAX_PLY][MAX_PLY]{};
     int pv_length[MAX_PLY + 1]{};
     Key rep_keys[MAX_PLY + 1]{};
@@ -2013,30 +1982,8 @@ struct Searcher {
         return move_gives_check(pos, mem, move);
     }
 
-    [[nodiscard]] inline bool use_nnue() const noexcept {
-        return limits.use_nnue && nnue::loaded();
-    }
-
     [[nodiscard]] inline bool use_mnue() const noexcept {
-        return limits.use_nnue
-            && (
-                mnue::x1::loaded()
-                || mnue::x2::loaded()
-                || mnue::v2::loaded()
-                || mnue::p2_loaded()
-            );
-    }
-
-    [[nodiscard]] inline bool use_mnue_x1() const noexcept {
-        return limits.use_nnue && mnue::x1::loaded();
-    }
-
-    [[nodiscard]] inline bool use_mnue_x2() const noexcept {
-        return limits.use_nnue && mnue::x2::loaded();
-    }
-
-    [[nodiscard]] inline bool use_mnue_v2() const noexcept {
-        return limits.use_nnue && mnue::v2::loaded();
+        return mnue::p2_loaded();
     }
 
     inline void make_search_move(
@@ -2044,18 +1991,9 @@ struct Searcher {
         Move move,
         StateInfo& st
     ) noexcept {
-        if (use_mnue_x1())
-            x1_accumulator_stack.push();
-        else if (use_mnue_x2()) {
-            // X2 currently uses full-rebuild evaluation.
-        }
-        else if (use_mnue_v2())
-            v2_accumulator_stack.push(pos, mem, move);
-        else if (use_mnue())
+        if (use_mnue())
             p2_accumulator_stack.push(pos, move);
         make_move(pos, move, mem.tables, st);
-        if (use_mnue_v2())
-            v2_accumulator_stack.after_make(pos, mem);
     }
 
     inline void unmake_search_move(
@@ -2064,50 +2002,21 @@ struct Searcher {
         const StateInfo& st
     ) noexcept {
         unmake_move(pos, move, mem.tables, st);
-        if (use_mnue_x1())
-            x1_accumulator_stack.pop();
-        else if (use_mnue_x2()) {
-            // X2 currently uses full-rebuild evaluation.
-        }
-        else if (use_mnue_v2())
-            v2_accumulator_stack.pop(pos, mem);
-        else if (use_mnue())
+        if (use_mnue())
             p2_accumulator_stack.pop();
     }
 
     [[nodiscard]] inline int evaluate_raw_position(const Position& pos) const noexcept {
-        if (use_mnue_x1()) {
-            return mnue::x1::evaluate_incremental(
-                pos,
-                mem,
-                x1_accumulator_stack
-            );
-        }
-        if (use_mnue_x2())
-            return mnue::x2::evaluate_reference(pos, mem);
-        if (use_mnue_v2()) {
-            return mnue::v2::evaluate_incremental(
-                pos,
-                mem,
-                v2_accumulator_stack
-            );
-        }
         if (use_mnue())
             return mnue::eval_p2(pos, p2_accumulator_stack);
-        if (use_nnue())
-            return nnue::eval(pos);
-        return eval::evaluate(pos);
+        return 0;
     }
 
     [[nodiscard]] inline int base_search_eval_from_raw(
         int raw_eval,
         const Position& pos
     ) const noexcept {
-        if (use_mnue())
-            return mnue::search_score(raw_eval, pos);
-        if (use_nnue())
-            return nnue::search_score(raw_eval, pos);
-        return raw_eval;
+        return mnue::search_score(raw_eval, pos);
     }
 
     [[nodiscard]] inline int evaluate_search_position(const Position& pos) const noexcept {
@@ -2439,7 +2348,6 @@ struct Searcher {
         info.keys = correction_keys(pos);
         const Color side = static_cast<Color>(pos.side_to_move);
         if (tt_raw_eval_available(probe)) {
-            mnue::v2::telemetry_note_tt_eval_reuse();
             info.raw = probe.data.eval;
         } else {
             info.raw = evaluate_raw_position(pos);
@@ -2724,7 +2632,6 @@ struct Searcher {
         rep_keys[ply] = pos.key;
         update_seldepth(ply);
         ++nodes;
-        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -2889,7 +2796,6 @@ struct Searcher {
             return qsearch(pos, alpha, beta, ply);
 
         ++nodes;
-        mnue::v2::telemetry_note_node();
         poll_limits();
         if (stopped)
             return alpha;
@@ -5250,11 +5156,6 @@ void emit_iteration_info(
         stream,
         current.score,
         local_root,
-        searcher.use_mnue_x2()
-            ? ScoreModel::MnueX2
-            : (searcher.use_mnue()
-                ? ScoreModel::Mnue
-                : (searcher.use_nnue() ? ScoreModel::Nnue : ScoreModel::Hce)),
         score_bound
     );
     stream << " nodes " << nodes
@@ -5350,8 +5251,6 @@ void emit_root_lines_info(
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
     searcher.p2_accumulator_stack.reset();
-    searcher.x1_accumulator_stack.reset();
-    searcher.v2_accumulator_stack.reset();
     searcher.root_side_to_move = keyed_root.side_to_move;
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
@@ -5747,8 +5646,6 @@ void emit_root_lines_info(
     Position keyed_root = local_root;
     position_refresh_key(keyed_root, searcher.mem.tables);
     searcher.p2_accumulator_stack.reset();
-    searcher.x1_accumulator_stack.reset();
-    searcher.v2_accumulator_stack.reset();
     searcher.root_side_to_move = keyed_root.side_to_move;
     searcher.start_time = search_start;
     searcher.stop_on_ponderhit = false;
@@ -6582,8 +6479,6 @@ void emit_root_lines_info(
 
         Searcher recovery_searcher(mem, recovery_limits);
         recovery_searcher.p2_accumulator_stack.reset();
-        recovery_searcher.x1_accumulator_stack.reset();
-        recovery_searcher.v2_accumulator_stack.reset();
         reset_searcher_iteration(
             recovery_searcher,
             timed_search ? search_start : Searcher::clock::now(),

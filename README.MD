@@ -24,8 +24,8 @@ reproducible testing, and a conventional high-performance search architecture.
 - Neural evaluation support through MNUE files, including P2/P2Pro-compatible
   loading and an embedded default MNUE P2 network in the standard build.
 - Optional Syzygy tablebase probing through the vendored Fathom backend.
-- Built-in validation and benchmark commands for perft, divide, search bench,
-  evaluation bench, and transposition-table bench.
+- Built-in search benchmark command for regression checks and PGO training.
+- Basic `perft <depth>` support for root move node counts.
 
 ## Major Version Strength Comparison
 
@@ -85,16 +85,15 @@ opponent, anchor, or direct predecessor test under the stated conditions.
 
 ### Evaluation
 
-- Hand-crafted evaluation fallback with tapered middle-game and end-game terms.
-- MNUE P2/P2Pro evaluation with a standard embedded P2 network in the build.
-- MNUE X1 and MNUEv2 development loaders and diagnostics.
-- Legacy NNUE fallback path where supported by the build.
-- If no neural evaluator is available, search falls back to HCE.
+- MNUE P2/P2Pro evaluation is the formal evaluation path.
+- The standard build embeds a default MNUE P2-family network.
+- External P2/P2Pro-compatible network files can be selected with `MNUEfile`.
+- Search expects an available MNUE evaluator for normal play.
 
 ## MNUE Networks
 
 The standard build embeds the MNUE P2/P2Pro-family file named in `src/Makefile`;
-the current default is the legacy P2 net:
+the current default is the embedded P2 net:
 
 ```text
 MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
@@ -120,7 +119,7 @@ An external MNUE file can be selected through UCI:
 setoption name MNUEfile value path/to/network.MNUE
 ```
 
-Both legacy P2 (`hidden=1024`) and P2Pro (`hidden=1408`) files are accepted.
+Both P2 (`hidden=1024`) and P2Pro (`hidden=1408`) files are accepted.
 Headerless Bullet `quantised.bin` payloads are detected by exact raw size.
 
 Use the embedded network again with:
@@ -272,33 +271,8 @@ cd src
 # Compact search benchmark.
 ./build/MagnusChess bench 12 64 1
 
-# Perft benchmark.
-./build/MagnusChess perft 6 64 1 magic
-
-# Equivalent perft shorthand.
-./build/MagnusChess 6 64 1 pext
-
-# Divide output.
-./build/MagnusChess divide 6 64 1 live magic
-
-# Fixed-depth search benchmark.
-./build/MagnusChess search 8 64 1
-
-# Evaluation benchmark.
-./build/MagnusChess evalbench 1000 64
-
-# Transposition-table benchmark.
-./build/MagnusChess -tt -hash 64
-```
-
-Available attack backends for perft and divide:
-
-```text
-auto
-pext
-magic
-table
-classical
+# Basic root-node perft from the start position.
+./build/MagnusChess perft 5
 ```
 
 ## UCI Interface
@@ -343,40 +317,23 @@ Primary UCI options:
 | Contempt | spin | 0 | Evaluation offset, range -10000 to 10000. |
 | Move Overhead | spin | 10 | Time-management overhead in milliseconds. |
 | Clear Hash | button | n/a | Clears the transposition table. |
-| UseNNUE | check | true | Enables the neural evaluation path when available. |
 | Ponder | check | true | Enables pondering support. |
 | FullPV | check | false | Enables extended PV reporting. |
-| Singular Telemetry | check | false | Emits singular-search telemetry. |
 | UseMsvSmp | check | false | Enables the MSV SMP mode. |
-| MsvInfo | check | false | Emits MSV diagnostic information. |
+| MsvInfo | check | false | Emits MSV info strings. |
 | SyzygyPath | string | `<empty>` | Directory containing Syzygy files. |
 | SyzygyProbeDepth | spin | 1 | Minimum depth for tablebase probes, range 1 to 100. |
 | Syzygy50MoveRule | check | true | Applies 50-move-rule-aware tablebase scoring. |
 | SyzygyProbeLimit | spin | 7 | Maximum tablebase piece count, range 0 to 7. |
 | MNUEfile | string | `mm-8adbe41d1.MNUE` | External MNUE file path or `<embedded>`. |
 
-Diagnostic commands include:
+Utility commands include:
 
 ```text
 d
 eval
 bench
-perft
-divide
-mnuedebug
-mnuecheck
-mnueloadp2 <path-to-p2-or-p2pro.mnue-or-quantised.bin>
-mnuev2load <path-to-v2.mnue>
-mnuev2info
-mnuev2debug
-mnuev2eval
-mnuev2check [sequences plies]
-mnuev2bench 1000 5
-mnuev2scalar on|off
-mnuex1load <path-to-x1.mnue>
-mnuex1eval
-mnuex1bench
-mnuex1check
+perft <depth>
 ```
 
 ## Repository Layout
@@ -384,11 +341,11 @@ mnuex1check
 ```text
 src/                    Engine source
 src/board/              Board representation, attacks, and move generation
-src/mnue/               MNUE evaluators, loaders, embedded-network support
+src/mnue/               Formal MNUE P2/P2Pro evaluator and embedded-network support
 src/syzygy/             Syzygy integration
 third_party/fathom/     Vendored Fathom tablebase probe
-tools/                  MNUE trainer utilities
-docs/                   Design notes and MNUE format documentation
+tools/                  Development and network-preparation utilities
+docs/                   Development notes and reference documentation
 ```
 
 ## License

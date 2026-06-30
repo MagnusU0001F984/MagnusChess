@@ -26,7 +26,6 @@ SOFTWARE.
 
 #include <array>
 
-#include "NnueLayout.h"
 #include "Types.h"
 
 namespace magnus {
@@ -50,19 +49,9 @@ struct Position {
     u8 mnue_phase_units = 0;
     Key material_signature = 0ULL;
 
-    int eval_mg[COLOR_NB]{};
-    int eval_eg[COLOR_NB]{};
-    int eval_phase = 0;
     Key key = 0;
 
     int board[SQ_NB];
-
-    mutable u32 nnue_generation = 0;
-    mutable bool nnue_acc_valid = false;
-    alignas(64) mutable std::array<
-        std::array<i16, nnue::kHiddenSize>,
-        COLOR_NB
-    > nnue_acc{};
 };
 
 // Reversible metadata captured before make_move().

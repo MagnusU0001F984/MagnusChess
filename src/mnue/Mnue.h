@@ -29,7 +29,6 @@ SOFTWARE.
 #include <ostream>
 #include <string>
 
-#include "Nnue.h"
 #include "Types.h"
 
 namespace magnus {
@@ -38,8 +37,16 @@ struct Position;
 
 namespace magnus::mnue {
 
-using WinRateParams = nnue::WinRateParams;
-using WdlTriplet = nnue::WdlTriplet;
+struct WinRateParams {
+    double a;
+    double b;
+};
+
+struct WdlTriplet {
+    int win;
+    int draw;
+    int loss;
+};
 
 // MNUE-P2: fast filter net.
 //   1 x 32 x 16 x 1024 x 10240

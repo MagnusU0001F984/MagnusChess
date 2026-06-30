@@ -39,31 +39,6 @@ SOFTWARE.
 
 namespace magnus {
 
-[[nodiscard]] inline const std::string& default_eval_file() {
-    static const std::string cached = []() -> std::string {
-        constexpr const char* candidates[] = {
-            "Evalfile.bin",
-            "build/Evalfile.bin",
-            "src/build/Evalfile.bin",
-            "src/Evalfile.bin",
-            "src/build/quantised.bin",
-            "NnueFile/nn-2a5d6101d177.nnue",
-            "src/NnueFile/nn-2a5d6101d177.nnue",
-            "NnueFile/nn-37f18f62d772.nnue",
-            "src/NnueFile/nn-37f18f62d772.nnue"
-        };
-
-        std::error_code ec;
-        for (const char* candidate : candidates) {
-            if (std::filesystem::exists(candidate, ec) && !ec)
-                return std::string(candidate);
-        }
-
-        return std::string("Evalfile.bin");
-    }();
-    return cached;
-}
-
 [[nodiscard]] inline bool parse_int(std::string_view sv, int& value) noexcept {
     const char* first = sv.data();
     const char* last = sv.data() + sv.size();
@@ -164,6 +139,39 @@ namespace magnus {
     }
 
     return false;
+}
+
+inline void set_start_position(Position& pos) noexcept {
+    position_clear(pos);
+
+    pos.side_to_move = WHITE;
+    pos.ep_sq = NO_SQ;
+    pos.castling_rights = ANY_CASTLING;
+    pos.halfmove_clock = 0;
+    pos.fullmove_number = 1;
+
+    for (int sq = 8; sq < 16; ++sq)
+        position_put_piece(pos, WHITE, PAWN, sq);
+    for (int sq = 48; sq < 56; ++sq)
+        position_put_piece(pos, BLACK, PAWN, sq);
+
+    position_put_piece(pos, WHITE, ROOK, 0);
+    position_put_piece(pos, WHITE, KNIGHT, 1);
+    position_put_piece(pos, WHITE, BISHOP, 2);
+    position_put_piece(pos, WHITE, QUEEN, 3);
+    position_put_piece(pos, WHITE, KING, 4);
+    position_put_piece(pos, WHITE, BISHOP, 5);
+    position_put_piece(pos, WHITE, KNIGHT, 6);
+    position_put_piece(pos, WHITE, ROOK, 7);
+
+    position_put_piece(pos, BLACK, ROOK, 56);
+    position_put_piece(pos, BLACK, KNIGHT, 57);
+    position_put_piece(pos, BLACK, BISHOP, 58);
+    position_put_piece(pos, BLACK, QUEEN, 59);
+    position_put_piece(pos, BLACK, KING, 60);
+    position_put_piece(pos, BLACK, BISHOP, 61);
+    position_put_piece(pos, BLACK, KNIGHT, 62);
+    position_put_piece(pos, BLACK, ROOK, 63);
 }
 
 class PvTrackingStreamBuf final : public std::streambuf {

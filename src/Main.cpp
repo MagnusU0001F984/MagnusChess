@@ -22,7 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include "Bench.h"
 #include "Uci.h"
 #ifdef _WIN32
 #include <windows.h>
@@ -34,7 +33,7 @@ SOFTWARE.
  * MagnusChess 命令列入口點 — 程式啟動與模式派發
  *
  * 無參數或 "uci" → 啟動 UCI 協定迴圈 (run_uci)
- * "bench" 或其他 → 啟動基準測試模式 (run_bench)
+ * "bench"/"perft" → 啟動精簡命令列工具 (run_bench)
  */
 int main(int argc, char** argv) {
 #ifdef _WIN32

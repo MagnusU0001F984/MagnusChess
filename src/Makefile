@@ -4,7 +4,6 @@ TARGET := MagnusChess
 
 BUILD_PROFILE ?= auto
 PGO ?= 0
-MNUEV2_TELEMETRY ?= 0
 BUILD_DIR := build
 TARGET_TRIPLE := $(shell $(CXX) -dumpmachine)
 X86_64_TARGET := $(filter x86_64% amd64%,$(TARGET_TRIPLE))
@@ -29,15 +28,13 @@ ifneq ($(PGO),0)
   endif
 endif
 
-ifneq ($(MNUEV2_TELEMETRY),0)
-  ifneq ($(MNUEV2_TELEMETRY),1)
-    $(error Unknown MNUEV2_TELEMETRY value '$(MNUEV2_TELEMETRY)'; use 0 or 1)
-  endif
-endif
-
 # Embedded P2/P2Pro network - single source of truth for the filename.
 # Changing this updates MnueEmbedded.S, Mnue.cpp, and Uci.cpp automatically.
 MNUE_EMBEDDED_FILE := mm-8adbe41d1.MNUE
+# OpenBench/fresh-clone helper: keep the large MNUE out of git.
+# Linux server uses the local file first; other workers fall back to GitHub raw.
+MNUE_EMBEDDED_LOCAL ?= /home/magnus/$(MNUE_EMBEDDED_FILE)
+MNUE_EMBEDDED_URL ?= https://raw.githubusercontent.com/TMagnusN/MagnusMNUE/main/$(MNUE_EMBEDDED_FILE)
 
 OBJ_VARIANT ?= normal
 OBJ_DIR := $(BUILD_DIR)/obj/$(EFFECTIVE_PROFILE)/$(OBJ_VARIANT)
@@ -47,18 +44,12 @@ PGO_BENCH_ARGS ?= bench
 
 SRC := \
 	board/Attack.cpp \
-	Bench.cpp \
-	Evaluation.cpp \
 	History.cpp \
 	Lmr.cpp \
 	Main.cpp \
 	MovePicker.cpp \
 	board/MoveGen.cpp \
 	Nmp.cpp \
-	Nnue.cpp \
-	PerftMoveGen.cpp \
-	Perft.cpp \
-	PerftPosition.cpp \
 	board/Position.cpp \
 	Search.cpp \
 	See.cpp \
@@ -66,13 +57,7 @@ SRC := \
 	Time.cpp \
 	TT.cpp \
 	Uci.cpp \
-	mnue/Mnue.cpp \
-	mnue/MnueX1Features.cpp \
-	mnue/MnueX1Network.cpp \
-	mnue/MnueX2Network.cpp \
-	mnue/MnueV2Features.cpp \
-	mnue/MnueV2Network.cpp \
-	mnue/MnueV2Telemetry.cpp
+	mnue/Mnue.cpp
 
 FATHOM_DIR := ../third_party/fathom
 FATHOM_OBJ := $(OBJ_DIR)/FathomTbProbe.o
@@ -87,9 +72,6 @@ MODULE_OBJ_DIRS := \
 	$(OBJ_DIR)/board \
 	$(OBJ_DIR)/mnue \
 	$(OBJ_DIR)/syzygy
-PERFT_CORE_OBJ := \
-	$(OBJ_DIR)/PerftMoveGen.o \
-	$(OBJ_DIR)/PerftPosition.o
 
 PORTABLE64_FLAGS := \
 	-m64 \
@@ -157,7 +139,6 @@ WARN_FLAGS := \
 	-Wno-sign-conversion
 
 CPPFLAGS := -MMD -MP -iquote . -I$(FATHOM_DIR) $(PROFILE_CPPFLAGS) \
-	-DMAGNUS_MNUEV2_TELEMETRY=$(MNUEV2_TELEMETRY) \
 	-DMNUE_EMBEDDED_FILENAME='"$(MNUE_EMBEDDED_FILE)"'
 
 BASE_CXXFLAGS := \
@@ -300,11 +281,6 @@ $(OBJ): | $(MODULE_OBJ_DIRS)
 $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
 	$(CXX) $(BASE_CXXFLAGS) $(PGO_CXXFLAGS) -c $< -o $@
 
-# Keep the large perft-only implementation opaque to whole-program LTO so
-# adding or tuning it cannot repartition the search code during LTRANS.
-$(PERFT_CORE_OBJ): $(OBJ_DIR)/%.o: %.cpp | $(OBJ_DIR)
-	$(CXX) $(BASE_CXXFLAGS) -fno-lto -c $< -o $@
-
 $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/tbprobe.c \
 	$(FATHOM_DIR)/tbprobe.h \
@@ -312,6 +288,24 @@ $(FATHOM_OBJ): \
 	$(FATHOM_DIR)/tbchess.c \
 	$(FATHOM_DIR)/stdendian.h | $(OBJ_DIR)
 	$(CC) $(FATHOM_CFLAGS) -c $(FATHOM_DIR)/tbprobe.c -o $@
+
+# Generate/copy/download embedded MNUE for clean OpenBench clones.
+ifeq ($(OS),Windows_NT)
+build/$(MNUE_EMBEDDED_FILE):
+	$(call MKDIR_P,$(BUILD_DIR))
+	@echo Downloading embedded MNUE: $(MNUE_EMBEDDED_URL)
+	curl.exe -L --fail --retry 5 --connect-timeout 20 "$(MNUE_EMBEDDED_URL)" -o "$(call fixpath,$@)"
+else
+build/$(MNUE_EMBEDDED_FILE):
+	$(call MKDIR_P,$(BUILD_DIR))
+	@if [ -f "$(MNUE_EMBEDDED_LOCAL)" ]; then \
+		echo "Using local embedded MNUE: $(MNUE_EMBEDDED_LOCAL)"; \
+		cp "$(MNUE_EMBEDDED_LOCAL)" "$@"; \
+	else \
+		echo "Downloading embedded MNUE: $(MNUE_EMBEDDED_URL)"; \
+		curl -L --fail --retry 5 --connect-timeout 20 "$(MNUE_EMBEDDED_URL)" -o "$@"; \
+	fi
+endif
 
 # === Embedded network (separate .S - no LTO, no PGO) ===
 # The incbin source is a raw 20.1 MiB MNUE file. We compile it as a standalone
