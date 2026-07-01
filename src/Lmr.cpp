@@ -144,8 +144,11 @@ LmrDecision decide_lmr(const LmrNodeContext& node, const LmrMoveContext& move) n
     if (node.exclusion_search ||
         node.mate_window ||
         node.checked ||
-        node.move_extension > 0 ||
-        move.is_tt_move) {
+        node.move_extension != 0 ||
+        move.is_tt_move ||
+        move.gives_check ||
+        move.recapture ||
+        move.promotion) {
         return decision;
     }
 

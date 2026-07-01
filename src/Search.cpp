@@ -193,7 +193,7 @@ static_assert(score_from_tt(VALUE_TB - 7, 0, 93) == VALUE_TB - 7);
 #endif
 
 #ifndef MAGNUS_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD
-#define MAGNUS_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD -32
+#define MAGNUS_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD -60
 #endif
 constexpr int SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD =
     MAGNUS_SEE_LATE_BAD_CAPTURE_GATE_THRESHOLD;
@@ -3354,31 +3354,14 @@ struct Searcher {
                 !checked &&
                 simple_capture &&
                 !ensure_gives_check() &&
-                search_depth <= CAPTURE_FUTILITY_DEPTH_LIMIT) {
+                search_depth <= 7) {
                 const PieceType captured_pt = move_is_ep(move) ? PAWN : piece_type_on(pos, to_sq(move));
                 const int captured_value = is_ok(captured_pt) ? piece_order_value[captured_pt] : 0;
                 // SPSA-tuned capture futility margin: base intercept + depth slope
                 // + material gain + scaled capture-history signal.
-                const int cap_futility = static_eval
-                    + CAPTURE_FUTILITY_BASE_MARGIN
-                    + CAPTURE_FUTILITY_DEPTH_MARGIN * search_depth
-                    + captured_value
-                    + CAPTURE_FUTILITY_HISTORY_SCALE * capture_history_score / 1024;
+                const int cap_futility = static_eval + 192 + 160 * search_depth
+                    + captured_value + 131 * capture_history_score / 1024;
                 if (cap_futility <= alpha)
-                    continue;
-            }
-
-            if (!pv_node &&
-                !checked &&
-                simple_capture &&
-                bad_capture &&
-                !ensure_gives_check() &&
-                search_depth <= BAD_NOISY_FUTILITY_DEPTH_LIMIT) {
-                const int bad_noisy_futility = static_eval
-                    + BAD_NOISY_FUTILITY_BASE_MARGIN
-                    + BAD_NOISY_FUTILITY_DEPTH_MARGIN * search_depth
-                    + BAD_NOISY_FUTILITY_HISTORY_SCALE * capture_history_score / 1024;
-                if (bad_noisy_futility <= alpha)
                     continue;
             }
 
@@ -3388,11 +3371,7 @@ struct Searcher {
                 !checked &&
                 simple_capture &&
                 move_index > 1) {
-                const int see_margin = std::max(
-                    SEE_BAD_CAPTURE_MARGIN_DEPTH * search_depth
-                        + capture_history_score * SEE_BAD_CAPTURE_HISTORY_SCALE / 1024,
-                    0
-                );
+                const int see_margin = std::max(167 * search_depth + capture_history_score * 34 / 1024, 0);
                 if (!search::see_ge(pos, mem, move, -see_margin))
                     continue;
             }
@@ -3423,7 +3402,7 @@ struct Searcher {
 
             if (!pv_node &&
                 !checked &&
-                search_depth <= FUTILITY_QUIET_DEPTH_LIMIT &&
+                search_depth <= 4 &&
                 quiet_move &&
                 !ensure_gives_check() &&
                 static_eval + futility_margin(search_depth, improving, history_score, correction) <= alpha) {

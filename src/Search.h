@@ -122,23 +122,12 @@ inline constexpr int FUTILITY_BASE_MARGIN       = 56;
 inline constexpr int FUTILITY_DEPTH_MARGIN      = 56;
 inline constexpr int FUTILITY_IMPROVING_MARGIN  = 24;
 inline constexpr int FUTILITY_HISTORY_DIVISOR   = 128;
-inline constexpr int FUTILITY_QUIET_DEPTH_LIMIT = 8;
-inline constexpr int CAPTURE_FUTILITY_DEPTH_LIMIT = 9;
-inline constexpr int CAPTURE_FUTILITY_BASE_MARGIN = 128;
-inline constexpr int CAPTURE_FUTILITY_DEPTH_MARGIN = 112;
-inline constexpr int CAPTURE_FUTILITY_HISTORY_SCALE = 96;
-inline constexpr int BAD_NOISY_FUTILITY_DEPTH_LIMIT = 10;
-inline constexpr int BAD_NOISY_FUTILITY_BASE_MARGIN = 24;
-inline constexpr int BAD_NOISY_FUTILITY_DEPTH_MARGIN = 84;
-inline constexpr int BAD_NOISY_FUTILITY_HISTORY_SCALE = 82;
 
 // --- SEE Pruning ---------------------------------------------
 inline constexpr int SEE_PRUNE_DEPTH_LIMIT      = 8;
 inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_DEPTH        = 3;
 inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MAX_DEPTH        = 10;
-inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 3;
-inline constexpr int SEE_BAD_CAPTURE_MARGIN_DEPTH = 96;
-inline constexpr int SEE_BAD_CAPTURE_HISTORY_SCALE = 24;
+inline constexpr int SEE_LATE_BAD_CAPTURE_GATE_MIN_CAPTURE_INDEX = 4;
 
 // --- Delta / QS ----------------------------------------------
 inline constexpr int DELTA_MARGIN               = 176;
@@ -155,10 +144,10 @@ inline constexpr int CAPTURE_HISTORY_HIGH_THRESHOLD = 128;
 inline constexpr int CAPTURE_TOPK               = 3;
 
 // --- Singular Extension --------------------------------------
-inline constexpr int SINGULAR_MIN_DEPTH               = 6;
-inline constexpr int SINGULAR_TT_DEPTH_MARGIN         = 4;
-inline constexpr int SINGULAR_MARGIN_BASE             = 20;
-inline constexpr int SINGULAR_MARGIN_PER_DEPTH        = 3;
+inline constexpr int SINGULAR_MIN_DEPTH               = 8;
+inline constexpr int SINGULAR_TT_DEPTH_MARGIN         = 3;
+inline constexpr int SINGULAR_MARGIN_BASE             = 24;
+inline constexpr int SINGULAR_MARGIN_PER_DEPTH        = 4;
 inline constexpr int SINGULAR_DOUBLE_MARGIN_BASE      = 48;
 inline constexpr int SINGULAR_DOUBLE_MARGIN_PER_DEPTH = 8;
 inline constexpr int SINGULAR_DOUBLE_MIN_DEPTH        = 12;
@@ -167,10 +156,10 @@ inline constexpr int SINGULAR_TRIPLE_MARGIN_PER_DEPTH = 12;
 inline constexpr int SINGULAR_TRIPLE_MIN_DEPTH        = 18;
 inline constexpr int SINGULAR_SCORE_NEAR_BETA         = 32;
 inline constexpr int SINGULAR_SCORE_STRONG            = 64;
-inline constexpr int SINGULAR_GOOD_HISTORY            = 768;
+inline constexpr int SINGULAR_GOOD_HISTORY            = 1024;
 inline constexpr int SINGULAR_RECENT_EXTENSION_PLIES  = 8;
-inline constexpr int SINGULAR_RECENT_EXTENSION_LIMIT  = 4;
-inline constexpr int SINGULAR_COST_RATIO_PERCENT      = 8;
+inline constexpr int SINGULAR_RECENT_EXTENSION_LIMIT  = 3;
+inline constexpr int SINGULAR_COST_RATIO_PERCENT      = 5;
 inline constexpr u64  SINGULAR_COST_GATE_MIN_NODES    = 4096;
 inline constexpr std::size_t SINGULAR_NODE_KINDS      = 3;
 inline constexpr std::size_t SINGULAR_DEPTH_BANDS     = 3;
@@ -178,7 +167,7 @@ inline constexpr std::size_t SINGULAR_SCORE_BANDS     = 3;
 inline constexpr std::size_t SINGULAR_TELEMETRY_BUCKETS =
     SINGULAR_NODE_KINDS * SINGULAR_DEPTH_BANDS * SINGULAR_SCORE_BANDS;
 inline constexpr std::size_t SINGULAR_TELEMETRY_EXTENSION_LEVELS = 3;
-inline constexpr int SINGULAR_TRUST_THRESHOLDS[SINGULAR_NODE_KINDS] = { 4, 4, 6 };
+inline constexpr int SINGULAR_TRUST_THRESHOLDS[SINGULAR_NODE_KINDS] = { 6, 6, 9 };
 
 // --- Correction History --------------------------------------
 inline constexpr int CORRECTION_HISTORY_SIZE        = 16384;
